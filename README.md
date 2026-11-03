@@ -89,7 +89,12 @@ docs/               protocol notes, Wi-Fi, resolution, testing, troubleshooting
 
 ## Credits and legal
 
-Protocol knowledge comes from [aasdk](https://github.com/OpenDsh/aasdk), the open-android-auto documentation, and
-analysis of one's own dongle and the AutoKit app. This is an interoperability experiment for hardware you own; it is not
-affiliated with Google, Carlinkit or the car maker. **No licence has been chosen yet**: add one before publishing
-(aasdk is GPLv3; if you copy code from it, comply with that).
+Protocol knowledge comes from [aasdk](https://github.com/OpenDsh/aasdk), the
+[open-android-auto](https://github.com/mrmees/open-android-auto) documentation, and analysis of one's own dongle and the
+AutoKit app. This is an interoperability experiment for hardware you own; it is not affiliated with Google, Carlinkit or
+the car maker. `scripts/fetch-assets.sh` downloads the Android Auto protobuf definitions and a sample TLS certificate from
+aasdk at install time; they are not part of this repository.
+
+## License
+
+GPL-3.0-or-later. See [LICENSE](LICENSE). Copyright (C) 2026 levan1i.
