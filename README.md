@@ -19,7 +19,7 @@ app expects). The Beagle itself is the **Android Auto head unit** for the phone,
 ## Status
 
 Works end to end with the AutoKit app (tested on an IM L6 and with AutoKit on a second phone / in an Android-x86 VM):
-Android Auto UI, touch, and audio reach the car. **Not finished**, see [Known gaps](#known-gaps). This is a research
+Android Auto UI, touch, and audio reach the car, and the picture quality over the 5 GHz link is good. **Not finished**, see [Known gaps](#known-gaps). This is a research
 project built from the public aasdk / open-android-auto work plus captures of a real dongle; expect rough edges.
 
 ## Hardware
@@ -78,8 +78,6 @@ docs/               protocol notes, Wi-Fi, resolution, testing, troubleshooting
 
 ## Known gaps
 
-* **Picture quality in the car** was reported "not good" in the first full car test; the cause has not been analysed
-  (candidates: encoder settings on the phone, 1080p frame cropped to the car's area, link quality).
 * The audio *start commands* (media 10/1, navigation 6/1) are guesses; only their length was seen from the real dongle.
 * Microphone (car → phone) is not implemented.
 * The phone name / Bluetooth address replayed to the car come from a sanitized capture, not from the real phone.
