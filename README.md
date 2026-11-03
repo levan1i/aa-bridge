@@ -24,6 +24,19 @@ project built from the public aasdk / open-android-auto work plus captures of a 
 
 ## Hardware
 
+**Everything here was developed and tested on a BeagleY-AI only.** The design is not tied to it: any single-board computer
+with the capabilities below should be able to run the bridge, but no other board has been tried, so expect to adapt
+board-specific settings (USB controller name, Wi-Fi interface and driver, power). See [docs/boards.md](docs/boards.md).
+
+Required capabilities:
+
+* a USB port that can act as a **device** (OTG/peripheral, FunctionFS/configfs gadget) to plug into the car
+* Wi-Fi with **5 GHz and AP mode** (for 1080p), plus classic Bluetooth (BR/EDR, HFP), on board or via USB adapters
+* a stable 5 V supply within what the car's USB port can deliver
+
+What was used on the prototype:
+
+
 | Part | Notes |
 |---|---|
 | BeagleY-AI | USB-C gadget port (`31000000.usb`) goes to the car |
