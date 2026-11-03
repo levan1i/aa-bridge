@@ -6,6 +6,18 @@ The car's USB-A/USB-C port sees a `1314:1521` "Auto Box" (the Carlinkit CPC200-C
 app expects). The Beagle itself is the **Android Auto head unit** for the phone, over wireless Android Auto
 (Bluetooth hand-off, then Wi-Fi). No dongle hardware is involved.
 
+## The problem it solves
+
+Some cars (the one this was built for is an IM L6) have no built-in Android Auto. Their head unit runs the **AutoKit**
+app, which talks to a small USB "box" (Carlinkit CPC200-CCPA / A15W and clones) that does the phone-projection work.
+The box is closed hardware with closed firmware. In the original setup it worked with an iPhone but **rebooted as soon as
+an Android phone connected**, and nothing could be done about it: no source, no way to fix or even log what failed.
+
+This project replaces the box with a board you control. The car still believes it has its Carlinkit box, and any phone with
+**wireless Android Auto** connects to it as if it were a normal head unit (Bluetooth for the hand-off, Wi-Fi for the stream),
+without a cable. Because it is open code, protocol problems can be logged, understood and fixed, and the video size, audio
+and touch handling can be adapted to the car.
+
 ```
  phone ──Bluetooth (RFCOMM hand-off)──► Beagle (BlueZ + aa_bt.py)
  phone ──Wi-Fi 5 GHz AP "WirelessAADongle"──► Beagle (hostapd, TCP 5288, aa_session.py: Android Auto head unit)
