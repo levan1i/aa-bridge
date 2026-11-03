@@ -8,8 +8,15 @@ app expects). The Beagle itself is the **Android Auto head unit** for the phone,
 
 ## The problem it solves
 
-Some cars (the one this was built for is an IM L6) have no built-in Android Auto. Their head unit runs the **AutoKit**
-app, which talks to a small USB "box" (Carlinkit CPC200-CCPA / A15W and clones) that does the phone-projection work.
+Chinese-built cars that are exported come in different flavours:
+
+* **EU-spec exports** are made for Europe and ship with Android Auto (and CarPlay) built in. No dongle is needed.
+* **Chinese-market cars exported with modified software** sit in a middle ground: the software is adapted for export, but
+  the head unit does not allow third-party apps, so you cannot simply install an Android Auto or projection app. The one
+  this was built for, an IM L6, is of this kind.
+
+On cars of the second kind the only way to get phone projection is the head unit's own **AutoKit** app, which talks to a
+small USB "box" (Carlinkit CPC200-CCPA / A15W and clones) that does the phone-projection work.
 The box is closed hardware with closed firmware. In the original setup it worked with an iPhone but **rebooted as soon as
 an Android phone connected**, and nothing could be done about it: no source, no way to fix or even log what failed.
 
