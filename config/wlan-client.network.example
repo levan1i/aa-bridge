@@ -1,0 +1,10 @@
+# EXAMPLE: DHCP on the on-board Wi-Fi (client, for internet) so it does not interfere with the car AP.
+# Copy to /etc/systemd/network/wlan1.network and adjust the interface name.
+[Match]
+Name=wlan1
+[Link]
+RequiredForOnline=no
+[Network]
+DHCP=ipv4
+[DHCPv4]
+RouteMetric=600

@@ -1,0 +1,13 @@
+[Unit]
+Description=Bluetooth pairing agent (no PIN, just works) for the phone
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+ExecStart=/usr/bin/bt-agent -c NoInputNoOutput
+Restart=always
+TimeoutStopSec=5
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Beagle Android Auto <-> Carlinkit bridge (car emulator + Android Auto head unit)
+After=local-fs.target network.target aa-hostapd.service aa-dnsmasq.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/beagle-aa-bridge/env
+WorkingDirectory=/opt/beagle-aa-bridge
+ExecStart=/usr/bin/python3 /opt/beagle-aa-bridge/src/standalone.py
+Restart=always
+RestartSec=2
+StandardOutput=append:/var/log/standalone.log
+StandardError=append:/var/log/standalone.log
+
+[Install]
+WantedBy=multi-user.target

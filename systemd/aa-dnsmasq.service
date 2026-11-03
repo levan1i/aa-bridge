@@ -1,0 +1,12 @@
+[Unit]
+Description=dnsmasq - DHCP for the Android Auto phone
+After=aa-hostapd.service
+Requires=aa-hostapd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/etc/beagle-aa-bridge/dnsmasq.conf
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

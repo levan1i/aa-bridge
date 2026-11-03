@@ -1,0 +1,10 @@
+# Debug aid for installs that lose power abruptly (e.g. in a car): flush the logs to disk every second.
+[Unit]
+Description=Flush logs to disk every second
+
+[Service]
+ExecStart=/bin/sh -c 'while true; do sync; sleep 1; done'
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

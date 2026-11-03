@@ -1,0 +1,5 @@
+# systemd-networkd must not touch the access-point interface (it gets 10.0.0.1/24 from aa-hostapd.service).
+[Match]
+Name=wlan2 SoftAp0
+[Link]
+Unmanaged=yes

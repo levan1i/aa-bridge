@@ -1,0 +1,25 @@
+# Access point the phone joins for wireless Android Auto (rendered by scripts/install.sh).
+# 5 GHz is REQUIRED for 1080p: Android Auto refuses video above 720p on a 2.4 GHz link
+# ("VideoCodecResolutionType 3 is not allowed due wireless frequency").
+ctrl_interface=/var/run/hostapd
+interface=@IFACE@
+driver=nl80211
+country_code=@COUNTRY@
+ieee80211d=1
+hw_mode=a
+channel=@CHANNEL@
+ieee80211n=1
+ht_capab=[HT40+][SHORT-GI-20][SHORT-GI-40]
+ieee80211ac=1
+vht_oper_chwidth=1
+vht_oper_centr_freq_seg0_idx=@VHT_CENTER@
+vht_capab=[SHORT-GI-80]
+wmm_enabled=1
+auth_algs=1
+wpa=2
+wpa_key_mgmt=WPA-PSK
+rsn_pairwise=CCMP
+ssid=@SSID@
+wpa_passphrase=@PSK@
+logger_syslog=-1
+logger_syslog_level=3

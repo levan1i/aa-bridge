@@ -1,0 +1,20 @@
+[Unit]
+Description=hostapd - Android Auto access point
+After=network.target
+Before=aa-dnsmasq.service
+StartLimitIntervalSec=120
+StartLimitBurst=4
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/beagle-aa-bridge/env
+ExecStartPre=/usr/local/sbin/aa-mkap.sh
+ExecStartPre=/bin/sh -c 'ip addr flush dev "${AA_AP_IFACE:-wlan2}"'
+ExecStartPre=/bin/sh -c 'ip link set "${AA_AP_IFACE:-wlan2}" up'
+ExecStartPre=/bin/sh -c 'ip addr add 10.0.0.1/24 dev "${AA_AP_IFACE:-wlan2}"'
+ExecStart=/usr/sbin/hostapd /etc/beagle-aa-bridge/hostapd.conf
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
