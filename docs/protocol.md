@@ -40,3 +40,10 @@ BlueZ with `--compat -P '*'`; the core SDP records `0x10000–0x10003` are delet
 Android Auto RFCOMM service `4de17a00-52cb-11e6-bdf4-0800200c9a66` (channel 8).
 RFCOMM exchange: `WifiStartRequest(ip, port 5288)` → `WifiInfoRequest` → `WifiInfoResponse(ssid, key, bssid, WPA2, DYNAMIC)`
 → `WifiConnectStatus`; the phone then joins the AP and connects to `ip:5288`.
+
+## Microphone, buttons, day/night (box side)
+
+* Audio command bytes (13-byte audio message): 1 output start, 2 output stop, 3 input config, 4/5 phone call start/stop, 6/7 navigation start/stop, 8/9 voice-assistant start/stop, 10/11 media start/stop, 12/13 alert start/stop. Start/stop must be paired, otherwise the car stays on the previous volume stream.
+* Microphone: when the phone opens the mic channel the box sends an audio message `(decodeType 5, 0.0, audioType 1)` with command byte 3 (16 kHz mono 16-bit), then Command 1 (start recording). The car answers with audio messages `(decodeType 5, vol, audioType 3)` + raw PCM (chunks of at least ~2560 bytes), which go to the phone as mic-channel media (8-byte big-endian microsecond timestamp + PCM). Command 2 stops recording.
+* Media keys (car to box, Command): 200 home, 201 play, 202 pause, 203 play/pause, 204 next, 205 previous, 300 answer, 301 hang up. After an audio stop the car app sends 201/202 itself (auto-resume); these are not button presses.
+* Day/night: the car sends `SendFile /tmp/night_mode` (4-byte value; 0 day, 1 night, 2 = let the box decide) and `{"DayNightMode":2}`; Command 16 = night, 17 = day when its theme changes. The box supplies the Android Auto NIGHT_DATA sensor event.

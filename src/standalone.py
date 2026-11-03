@@ -36,6 +36,22 @@ def nal_types(data):
         i = j + 3
 
 
+NIGHT_MODE = os.environ.get("AA_NIGHT", "auto")          # auto: the car's own report if any, else by clock; day / night: fixed
+NIGHT_FROM = int(os.environ.get("AA_NIGHT_FROM", "18"))  # hour night starts (local time, see AA_TZ)
+NIGHT_TO = int(os.environ.get("AA_NIGHT_TO", "7"))       # hour night ends
+
+
+def clock_night():
+    import datetime
+    tz = os.environ.get("AA_TZ", "")
+    try:
+        import zoneinfo
+        h = datetime.datetime.now(zoneinfo.ZoneInfo(tz) if tz else None).hour
+    except Exception:
+        h = datetime.datetime.now().hour
+    return (h >= NIGHT_FROM or h < NIGHT_TO) if NIGHT_FROM > NIGHT_TO else (NIGHT_FROM <= h < NIGHT_TO)
+
+
 class Car(boxd.Box):
     def __init__(self, app, *a, **k):
         self.app = app
@@ -60,16 +76,21 @@ class Car(boxd.Box):
             return
         if mtype in (T_FILE, T_BOXSET, T_APPINFO):
             log("<-", {T_FILE: "SendFile", T_BOXSET: "BoxSettings", T_APPINFO: "AppInfo"}[mtype], pay[:700].decode(errors="replace").replace("\n", " ").replace("\t", ""))
+            if mtype == T_FILE and b"/tmp/night_mode" in pay and len(pay) >= 4:
+                self.app.car_night_file(struct.unpack("<I", pay[-4:])[0])      # 0 day, 1 night, 2 = the box decides
             return
         if mtype == T_CMD and len(pay) >= 4:
             v = struct.unpack("<I", pay[:4])[0]
             log("<- Command", v)
+            self.app.car_command(v)
             return
         if mtype in (T_TOUCH, T_MTOUCH):
             self.app.car_touch(mtype, pay)
             return
-        if mtype == T_AUDIO:
-            return                                               # car microphone: not supported yet
+        if mtype == T_AUDIO:                                     # car microphone: <IfI decodeType, volume, audioType=3> + PCM
+            if len(pay) > 12 and struct.unpack("<I", pay[8:12])[0] == 3:
+                self.app.car_mic(pay[12:])
+            return
         log("<- type 0x%x len=%d %s" % (mtype, len(pay), pay[:24].hex()))
 
 
@@ -86,10 +107,18 @@ class App:
         self.touch_down = {}
         self.sid = 0
         self.vstats = {"in": 0, "out": 0}
+        self.mic_on = False                  # the phone has the microphone open and the car was told to record
+        self.mic_chunks = 0
 
     # -------------------------------------------------- car -> app (car thread)
     def car_opened(self):
         self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self.sync_car()))
+
+    def car_mic(self, pcm):
+        self.mic_chunks += 1
+        s = self.session
+        if s and s.alive and s.mic_open:
+            self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(s.send_mic(pcm)))
 
     _tl = 0
 
@@ -130,8 +159,27 @@ class App:
                 n += 1
                 await asyncio.sleep(0.03)
         log("announced the phone to the car (%d messages); restarting the video stream" % n)
+        self.mic_on = False                          # the car app restarted its session: its recorder is off again
+        if self.session and self.session.mic_open:
+            self.on_mic(True)
         self.cfg, self.car_ready, self.synced = b"", True, False
         await self.restart_video()
+
+    # -------------------------------------------------- microphone (phone asks -> car records -> PCM to the phone)
+    def on_mic(self, opened):
+        """The phone opened/closed the microphone channel. AutoKit records only after an INPUT_CONFIG audio message
+        (decodeType 5 = 16 kHz mono, audioType 1, command byte 3) and a Command 1; Command 2 stops it."""
+        if not self.box or not self.car_is_open:
+            return
+        if opened and not self.mic_on:
+            self.box.send(T_AUDIO, struct.pack("<IfI", 5, 0.0, 1) + bytes([3]), droppable=False)
+            self.box.send(T_CMD, struct.pack("<I", 1), droppable=False)
+            self.mic_on, self.mic_chunks = True, 0
+            log("microphone: phone opened it -> car told to record (INPUT_CONFIG 16 kHz mono + cmd 1)")
+        elif not opened and self.mic_on:
+            self.box.send(T_CMD, struct.pack("<I", 2), droppable=False)
+            self.mic_on = False
+            log("microphone: phone closed it -> car told to stop (cmd 2); %d chunks received" % self.mic_chunks)
 
     async def restart_video(self):
         s = self.session
@@ -165,9 +213,54 @@ class App:
     _aon = {}          # audio_type -> time of last PCM; a stream is "on" once its start command was sent
 
     def _acmd(self, atype, dec, cmds):
+        self._alast = time.time()
         for c in cmds:                                       # 12-byte header + 1 command byte (as the real dongle sends)
             self.box.send(boxd.T_AUDIO, struct.pack("<IfI", dec, 0.0, atype) + bytes([c]), droppable=False)
         log("audio start commands", atype, cmds)
+
+    _astop = {1: ((11, 2), 2.0), 2: ((7, 2), 1.0)}   # audio_type -> (stop commands: MEDIA_STOP/NAVI_STOP + OUTPUT_STOP, silence before stopping)
+    car_night = None                                     # day/night as explicitly reported by the car (None = left to the box)
+
+    def car_night_file(self, v):
+        self.car_night = {0: False, 1: True}.get(v)
+        log("car night_mode file = %d (%s)" % (v, "auto: the box decides" if self.car_night is None else "night" if self.car_night else "day"))
+
+    def want_night(self):
+        if NIGHT_MODE in ("day", "night"):
+            return NIGHT_MODE == "night"
+        return self.car_night if self.car_night is not None else clock_night()
+
+    async def update_night(self):
+        s = self.session
+        n = self.want_night()
+        if s and s.alive and s.night != n:
+            await s.send_night(n)
+
+    async def night_loop(self):
+        while True:
+            await asyncio.sleep(30)
+            await self.update_night()
+    _alast = 0.0                                         # time of the last audio start/stop command we sent to the car
+    _aact = {}                                           # audio_type -> decode type of a stream the car was told to start
+
+    def audio_stop(self, atype):
+        """Close a stream on the car (otherwise the car stays in the navigation/voice audio state)."""
+        dec = self._aact.pop(atype, None)
+        self._aon.pop(atype, None)
+        if dec is not None and self.box and self.car_is_open:
+            cmds = self._astop[atype][0]
+            self._alast = time.time()
+            for c in cmds:
+                self.box.send(boxd.T_AUDIO, struct.pack("<IfI", dec, 0.0, atype) + bytes([c]), droppable=False)
+            log("audio stop commands", atype, cmds)
+
+    async def audio_watchdog(self):
+        while True:
+            await asyncio.sleep(0.25)
+            now = time.time()
+            for atype in list(self._aact):
+                if now - self._aon.get(atype, 0) > self._astop[atype][1]:
+                    self.audio_stop(atype)
 
     def on_audio(self, ch, ts, pcm):
         if not self.car_ready:
@@ -176,8 +269,28 @@ class App:
         now = time.time()
         if now - self._aon.get(atype, 0) > 1.5:
             self._acmd(atype, dec, (10, 1) if atype == 1 else (6, 1))   # MEDIA_START/OUTPUT_START, or NAVI_START
+        self._aact[atype] = dec
         self._aon[atype] = now
         self.box.send(boxd.T_AUDIO, struct.pack("<IfI", dec, 0.0, atype) + pcm)
+
+    # -------------------------------------------------- buttons car -> phone
+    # box protocol Command value -> Android keycode (steering-wheel / head-unit media keys)
+    KEYMAP = {200: 3, 201: 126, 202: 127, 203: 85, 204: 87, 205: 88, 106: 4}   # home, play, pause, play/pause, next, prev, back
+
+    def car_command(self, v):
+        if v in (16, 17):                                    # the car's day/night theme
+            self.car_night = (v == 16)
+            log("car reports %s" % ("night" if self.car_night else "day"))
+            self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self.update_night()))
+            return
+        key = self.KEYMAP.get(v)
+        if v in (201, 202) and time.time() - self._alast < 1.5:
+            log("car play/pause %d right after an audio command: the car's own auto-resume, not forwarded" % v)
+            return
+        s = self.session
+        if key and s and s.alive:
+            log("car button %d -> Android key %d" % (v, key))
+            asyncio.run_coroutine_threadsafe(s.send_key(key), self.loop)
 
     # -------------------------------------------------- touch car -> phone
     async def do_touch(self, mtype, pay):
@@ -200,16 +313,23 @@ class App:
 
     # -------------------------------------------------- phone session loop
     async def run_session(self, r, w, how):
-        s = aas.AASession(r, w, on_video=self.on_video, on_audio=self.on_audio, mode=aas.compute_mode(*self.car_size))
+        s = aas.AASession(r, w, on_video=self.on_video, on_audio=self.on_audio, mode=aas.compute_mode(*self.car_size), on_mic=self.on_mic, night=self.want_night())
         self.session = s
         log("phone session started (%s), video mode for car display %dx%d: res %d frame %dx%d ui %dx%d" % ((how,) + self.car_size + (s.mode["res"], s.mode["fw"], s.mode["fh"], s.mode["uw"], s.mode["uh"])))
         task = asyncio.ensure_future(s.run())
+        wd = asyncio.ensure_future(self.audio_watchdog())
+        nl = asyncio.ensure_future(self.night_loop())
         await s.wait_video_started()
         log("phone session is streaming")
         if self.car_is_open:
             await self.announce_phone(self.sid)
         await task
+        wd.cancel(); nl.cancel()
+        for a in list(self._aact):
+            self.audio_stop(a)
         log("phone session ended")
+        if self.mic_on:
+            self.on_mic(False)
         self.session, self.car_ready, self.synced = None, False, False
         try:
             self.box.send(4, b"")                             # Unplugged

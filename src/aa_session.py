@@ -125,7 +125,10 @@ def bt_address():
 
 
 class AASession:
-    def __init__(self, reader, writer, on_video=None, on_audio=None, name="phone", mode=None):
+    def __init__(self, reader, writer, on_video=None, on_audio=None, name="phone", mode=None, on_mic=None, night=False):
+        self.on_mic = on_mic                       # called with True/False when the phone opens/closes the microphone
+        self.mic_open = False
+        self.night = night
         self.mode = mode or compute_mode(1920, 720)
         self.r, self.w, self.name = reader, writer, name
         self.on_video, self.on_audio = on_video, on_audio
@@ -292,6 +295,35 @@ class AASession:
         await self.send_msg(CH_INPUT, 0x8001, ev)
         self.stats["touch"] += 1
 
+    async def send_night(self, night):
+        """Tell the phone the car switched between day and night (Android Auto changes the map and UI theme)."""
+        self.night = bool(night)
+        if not self.alive:
+            return
+        ev = sevent.SensorEventIndication()
+        ev.night_mode.add().is_night = self.night
+        await self.send_msg(CH_SENSOR, 0x8003, ev)
+        log("-> night mode %s" % ("ON" if self.night else "off"))
+
+    async def send_key(self, keycode):
+        """Press and release one Android key (media/navigation button) on the phone."""
+        if not self.alive:
+            return
+        for down in (True, False):
+            ev = inev.InputEventIndication()
+            ev.timestamp = int(time.time() * 1e6)
+            b = ev.button_event.button_events.add()
+            b.scan_code, b.is_pressed, b.meta, b.long_press = keycode, down, 0, False
+            await self.send_msg(CH_INPUT, 0x8001, ev)
+        self.stats["key"] = self.stats.get("key", 0) + 1
+
+    async def send_mic(self, pcm):
+        """Car microphone audio to the phone: 16 kHz, 16-bit, mono PCM as AV media with a timestamp on the mic channel."""
+        if not (self.alive and self.mic_open and pcm):
+            return
+        await self.send_msg(CH_MIC, 0x0000, struct.pack(">Q", int(time.time() * 1e6)) + pcm)
+        self.stats["mic"] = self.stats.get("mic", 0) + 1
+
     async def wait_video_started(self):
         while self.alive and self.stats["video"] == 0:
             await asyncio.sleep(0.1)
@@ -399,7 +431,7 @@ class AASession:
                 if q.sensor_type == 13:
                     ev.driving_status.add().status = 0                  # unrestricted
                 elif q.sensor_type == 10:
-                    ev.night_mode.add().is_night = False
+                    ev.night_mode.add().is_night = self.night
                 else:
                     log("<- sensor start for unsupported type", q.sensor_type); return
                 await self.send_msg(ch, 0x8003, ev)
@@ -413,6 +445,9 @@ class AASession:
                 rs = avinopenresp.AVInputOpenResponse(); rs.session = 0; rs.value = 0
                 await self.send_msg(ch, 0x8006, rs)
                 log("<- mic OPEN open=%s -> OK" % q.open)
+                self.mic_open = bool(q.open)
+                if self.on_mic:
+                    self.on_mic(self.mic_open)
             elif mid == 0x8000:
                 rs = avsetupresp.AVChannelSetupResponse(); rs.media_status = 2; rs.max_unacked = 1; rs.configs.append(0)
                 await self.send_msg(ch, 0x8003, rs)

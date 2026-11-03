@@ -94,6 +94,9 @@ Logs: `/var/log/standalone.log`, `/var/log/aa_bt.log`.
 | `AA_AP_DRIVER` | `rtw88` | kernel driver of the AP adapter (used by `aa-mkap.sh` / `aa-iwd.sh`) |
 | `AA_RES` | follow the car | force an AA video size: 1=800x480, 2=1280x720, 3=1920x1080, 5/6/7 = portrait |
 | `AA_DPI` | 160 | density the phone lays its UI out for |
+| `AA_NIGHT` | `auto` | day/night theme sent to the phone: `auto` (the car's own report if it sends one, otherwise by clock), or fixed `day` / `night` |
+| `AA_NIGHT_FROM`, `AA_NIGHT_TO` | `18`, `7` | hours (local time) when night starts and ends in `auto` mode |
+| `AA_TZ` | system time zone | time zone for the clock-based day/night, e.g. `Asia/Tbilisi` |
 
 ## Layout
 
@@ -110,8 +113,10 @@ docs/               protocol notes, Wi-Fi, resolution, testing, troubleshooting
 
 ## Known gaps
 
-* The audio *start commands* (media 10/1, navigation 6/1) are guesses; only their length was seen from the real dongle.
-* Microphone (car → phone) is not implemented.
+* Microphone (car → phone) works (verified: voice assistant on the phone hears the car's mic). The car-side protocol comes from a decompile of an older AutoKit version, not the 2025 one.
+* Steering-wheel / head-unit media keys: forwarding to the phone is implemented (box Commands 201–205 → Android media keys), but the car tested here never sends them to the box, so it is unproven. The car's own play/pause commands that follow audio changes are deliberately not forwarded.
+* Day/night: the car only says "auto" (`night_mode` = 2), so the bridge decides by clock (`AA_NIGHT*`), not from real light or headlight state. An explicit report from the car (Command 16/17) is honoured if one ever arrives.
+* Audio stop commands (navigation/voice 7, media 11, output 2) are sent when a stream goes silent so the car returns to the music volume; the timings are tuned by hand.
 * The phone name / Bluetooth address replayed to the car come from a sanitized capture, not from the real phone.
 * Touch mapping assumes the car app stretches the UI area over its whole view.
 * Uses a published sample TLS certificate from aasdk to talk to the phone.
