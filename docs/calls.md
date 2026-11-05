@@ -1,0 +1,32 @@
+# Phone calls through the car's speakers and microphone (experimental, `AA_CALLS=1`)
+
+Android Auto does not carry phone-call voice over its own link (checked in the logs: during a call the phone opens no
+microphone channel and sends no call audio). Calls go over Bluetooth hands-free instead, to whatever the phone treats as the
+"car kit". The Beagle is that car kit (it shows up as an HSP headset), so without this feature the call audio goes nowhere:
+you may hear nothing, and the other side hears nothing.
+
+```
+caller <-> phone ==Bluetooth SCO (8 kHz mono)==> Beagle (aa_bt.py + callaudio.py)
+                                                    │  local UDP 127.0.0.1:5290 / 5291
+                                                    ▼
+                                          standalone.py ==USB box protocol==> car speakers + car microphone
+```
+
+* `callaudio.py` (inside `aa_bt.py`): answers the headset link's AT commands with `OK`, listens for the phone's SCO connection,
+  sends the caller's voice (8 kHz s16 mono) to the bridge, and writes the car's microphone back into SCO packet by packet.
+* `standalone.py`: on call start sends the car an audio message `(decodeType 3 = 8 kHz mono, audioType 1)` with command 4
+  (PHONECALL_START), tells the car to record the microphone (INPUT_CONFIG + Command 1), streams the caller's voice as audio
+  messages, takes the car mic (16 kHz), halves it to 8 kHz and returns it. On the end it sends command 5 (PHONECALL_STOP) and
+  Command 2.
+* Enable with `AA_CALLS=1` in `/etc/beagle-aa-bridge/env`, then restart `aa-bt` and `standalone`.
+
+## Limits / what to check (untested on a real car)
+
+* SCO over a USB Bluetooth adapter needs the kernel's SCO-over-HCI path; if the log shows `SCO link from ...` but no audio, the
+  adapter or its alternate setting may be at fault. Voice is narrow-band (CVSD, 8 kHz): it sounds like a phone call.
+* The log should show: `call audio: SCO link from ...`, `call: audio link up -> car told call start + record`, then
+  `call audio: SCO closed (N packets in, N out)`. No `SCO link` line means the phone never routed the call to the Beagle.
+* The phone only routes calls (and apps such as Google Meet) to the Beagle if Android treats it as the active hands-free
+  device; check the phone's Bluetooth settings for the Beagle ("Phone calls" must be on).
+* The assistant's microphone use and a call at the same time are not handled.
+* Wide-band (mSBC) calls are not supported.

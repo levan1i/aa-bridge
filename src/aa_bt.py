@@ -124,6 +124,15 @@ def handshake(sock, who):
 
 
 HELD = []     # sockets we must keep open (HFP/HSP)
+CALLS = None  # call audio relay (SCO <-> bridge), only when AA_CALLS=1
+
+
+def _calls():
+    global CALLS
+    import callaudio
+    if CALLS is None and callaudio.ENABLED:
+        CALLS = callaudio.CallAudio(log)
+    return CALLS
 
 
 class Profile(ServiceInterface):
@@ -144,6 +153,8 @@ class Profile(ServiceInterface):
         else:
             sock.setblocking(True)
             HELD.append(sock)                 # HFP/HSP: just keep the link open
+            if self.kind == "hsp" and _calls():
+                _calls().attach_rfcomm(sock)  # ... and answer its AT commands so the phone keeps the headset
 
     @method()
     def RequestDisconnection(self, device: "o"):
@@ -201,6 +212,12 @@ async def main():
         except Exception as e:
             log("adapter property %s not set: %s" % (k, e))
     log("adapter hci0 powered, discoverable as '%s'" % ALIAS)
+    if _calls():
+        try:
+            addr = (await props.call_get("org.bluez.Adapter1", "Address")).value
+            _calls().start(addr)
+        except Exception as e:
+            log("call audio not started:", repr(e))
     if not os.environ.get("AA_NO_TCP"):
         await tcp_server()
     log("ready: pair the phone with '%s' and wait for the Android Auto prompt" % ALIAS)

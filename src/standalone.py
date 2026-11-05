@@ -9,7 +9,7 @@
 * video: AA H.264 -> Carlinkit video messages; audio: AA PCM -> Carlinkit audio messages; touch: car -> AA input.
 Run as root on the Beagle. Phone: Android Auto 'Start head unit server' (until the Bluetooth start-up works again).
 """
-import argparse, asyncio, json, os, struct, sys, threading, time
+import argparse, asyncio, json, os, socket, struct, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -97,6 +97,7 @@ class Car(boxd.Box):
 class App:
     def __init__(self, loop, phone_ip, ref):
         self.loop, self.phone_ip, self.ref = loop, phone_ip, ref
+        self._call_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.box = None
         self.session = None
         self.car_size = DEFAULT_CAR_SIZE     # display area the car asked for (Open message); decides the phone's video mode
@@ -114,8 +115,46 @@ class App:
     def car_opened(self):
         self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self.sync_car()))
 
+    # -------------------------------------------------- phone calls (the Beagle is the phone's Bluetooth headset; see callaudio.py)
+    call_active = False
+    call_mic = False
+    CALL_OUT = ("127.0.0.1", int(os.environ.get("AA_CALL_PORT_IN", "5291")))      # car mic -> aa_bt (SCO)
+
+    def call_datagram(self, data):
+        """From aa_bt over local UDP: b'S' call audio started, b'A'+PCM 8 kHz mono (the caller), b'E' ended."""
+        kind, body = data[:1], data[1:]
+        if not self.box or not self.car_is_open:
+            return
+        if kind == b"S":
+            self.call_active = True
+            self.box.send(T_AUDIO, struct.pack("<IfI", 3, 0.0, 1) + bytes([4]), droppable=False)        # PHONECALL_START, 8 kHz mono
+            if not self.mic_on:                                                                           # car microphone on
+                self.box.send(T_AUDIO, struct.pack("<IfI", 5, 0.0, 1) + bytes([3]), droppable=False)
+                self.box.send(T_CMD, struct.pack("<I", 1), droppable=False)
+                self.mic_on = self.call_mic = True
+            log("call: audio link up -> car told call start + record")
+        elif kind == b"A" and self.call_active:
+            self.box.send(T_AUDIO, struct.pack("<IfI", 3, 0.0, 1) + body)
+        elif kind == b"E" and self.call_active:
+            self.call_active = False
+            self.box.send(T_AUDIO, struct.pack("<IfI", 3, 0.0, 1) + bytes([5]), droppable=False)        # PHONECALL_STOP
+            if self.call_mic:
+                self.box.send(T_CMD, struct.pack("<I", 2), droppable=False)
+                self.mic_on = self.call_mic = False
+            log("call: audio link down -> car told call stop")
+
+    def call_mic_audio(self, pcm):
+        """Car microphone (16 kHz mono) -> 8 kHz for the phone's SCO link."""
+        import array
+        a = array.array("h")
+        a.frombytes(pcm[:len(pcm) // 2 * 2])
+        out = array.array("h", [(a[i] + a[i + 1]) // 2 for i in range(0, len(a) - 1, 2)])
+        self._call_sock.sendto(out.tobytes(), self.CALL_OUT)
+
     def car_mic(self, pcm):
         self.mic_chunks += 1
+        if self.call_active:
+            self.call_mic_audio(pcm)
         s = self.session
         if s and s.alive and s.mic_open:
             self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(s.send_mic(pcm)))
@@ -176,7 +215,7 @@ class App:
             self.box.send(T_CMD, struct.pack("<I", 1), droppable=False)
             self.mic_on, self.mic_chunks = True, 0
             log("microphone: phone opened it -> car told to record (INPUT_CONFIG 16 kHz mono + cmd 1)")
-        elif not opened and self.mic_on:
+        elif not opened and self.mic_on and not self.call_active:
             self.box.send(T_CMD, struct.pack("<I", 2), droppable=False)
             self.mic_on = False
             log("microphone: phone closed it -> car told to stop (cmd 2); %d chunks received" % self.mic_chunks)
@@ -381,6 +420,12 @@ async def amain(a):
     loop = asyncio.get_running_loop()
     ref = json.load(open(a.ref))
     app = App(loop, a.phone, ref)
+    if os.environ.get("AA_CALLS", "0") == "1":
+        class _Calls(asyncio.DatagramProtocol):
+            def datagram_received(self, data, addr):
+                app.call_datagram(data)
+        await loop.create_datagram_endpoint(_Calls, local_addr=("127.0.0.1", int(os.environ.get("AA_CALL_PORT_OUT", "5290"))))
+        log("calls: relay enabled (UDP %s)" % os.environ.get("AA_CALL_PORT_OUT", "5290"))
     ep0 = boxd.setup_gadget(a.udc)
     ep_in = os.open(boxd.FFS + "/ep1", os.O_WRONLY)
     ep_out = os.open(boxd.FFS + "/ep2", os.O_RDONLY)
