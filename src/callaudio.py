@@ -23,6 +23,9 @@ CALL_FROM_BRIDGE = int(os.environ.get("AA_CALL_PORT_IN", "5291"))
 SCO_BATCH = 320                  # bytes (20 ms at 8 kHz) per UDP datagram; SCO packets are small (typ. 48 bytes)
 MIC_CAP = 8000 * 2 // 2          # keep at most 0.5 s of car microphone audio
 MIC_GAIN = float(os.environ.get("AA_CALL_MIC_GAIN", "6"))     # the car mic arrives quiet; phone apps can mistake it for noise
+DUCK = float(os.environ.get("AA_CALL_DUCK", "0.1"))           # mic level while the caller is talking (1 = no echo suppression)
+DUCK_LEVEL = int(os.environ.get("AA_CALL_DUCK_LEVEL", "300"))  # caller sample above this counts as talking
+DUCK_HOLD = float(os.environ.get("AA_CALL_DUCK_HOLD", "0.4"))  # seconds to stay ducked: the speaker-to-mic echo arrives late
 TONE_FILE = "/run/aa-call-tone"  # if this file exists when a call starts, send a 440 Hz test tone instead of the car mic
 TONE = array.array("h", [int(12000 * math.sin(2 * math.pi * 440 * i / 8000)) for i in range(8000)]).tobytes()   # 1 s, loops cleanly
 
@@ -39,6 +42,25 @@ def amplify(pcm, gain):
     a = array.array("h")
     a.frombytes(pcm[:len(pcm) // 2 * 2])
     return array.array("h", [max(-32768, min(32767, int(x * gain))) for x in a]).tobytes()
+
+
+class Ducker:
+    """Half-duplex echo suppression: the car mic hears the caller from the car speakers, so turn it down while they talk."""
+
+    def __init__(self, depth=DUCK, level=DUCK_LEVEL, hold=DUCK_HOLD):
+        self.depth, self.level, self.hold = depth, level, hold
+        self.gain = 1.0
+        self.until = 0.0
+        self.ducked = 0                                        # packets spent turned down, for the log
+
+    def process(self, caller_peak, mic, now):
+        if caller_peak >= self.level:
+            self.until = now + self.hold
+        target = self.depth if now < self.until else 1.0
+        self.gain += (target - self.gain) * (0.5 if target < self.gain else 0.05)    # fast down, slow up: no clicks
+        if target < 1.0:
+            self.ducked += 1
+        return mic if self.gain > 0.99 else amplify(mic, self.gain)
 
 
 class CallAudio:
@@ -131,6 +153,7 @@ class CallAudio:
         pending = bytearray()
         n_in = n_out = peak_in = peak_out = tone_pos = self.fill = 0
         tone = os.path.exists(TONE_FILE)
+        ducker = Ducker()
         if tone:
             self.log("call audio: sending the 440 Hz test tone instead of the car mic")
         t0 = time.time()
@@ -148,7 +171,7 @@ class CallAudio:
                     m = (TONE + TONE)[tone_pos:tone_pos + len(d)]
                     tone_pos = (tone_pos + len(d)) % len(TONE)
                 else:
-                    m = self._take_mic(len(d))                 # every packet in -> one packet of car microphone out
+                    m = ducker.process(peak(d), self._take_mic(len(d)), time.time())    # every packet in -> one packet of car mic out
                 conn.send(m)
                 n_out += 1
                 peak_in, peak_out = max(peak_in, peak(d)), max(peak_out, peak(m))
@@ -161,5 +184,5 @@ class CallAudio:
             except OSError:
                 pass
             self.out.sendto(b"E", ("127.0.0.1", CALL_TO_BRIDGE))
-            self.log("call audio: SCO closed after %.0f s (%d packets in, %d out, %d of them empty filler; loudest sample: caller %d, sent to phone %d of 32767, gain %g)"
-                     % (time.time() - t0, n_in, n_out, self.fill, peak_in, peak_out, MIC_GAIN))
+            self.log("call audio: SCO closed after %.0f s (%d packets in, %d out, %d of them empty filler, %d ducked; loudest sample: caller %d, sent to phone %d of 32767, gain %g)"
+                     % (time.time() - t0, n_in, n_out, self.fill, ducker.ducked, peak_in, peak_out, MIC_GAIN))

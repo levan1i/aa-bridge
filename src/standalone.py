@@ -41,7 +41,10 @@ NIGHT_FROM = int(os.environ.get("AA_NIGHT_FROM", "18"))  # hour night starts (lo
 NIGHT_TO = int(os.environ.get("AA_NIGHT_TO", "7"))       # hour night ends
 
 
-CALL_DEC = int(os.environ.get("AA_CALL_DEC", "5"))       # call audio format on the car link: 5 = 16 kHz mono, 3 = 8 kHz mono
+# Call formats on the car link (3 = 8 kHz mono, 5 = 16 kHz mono), as observed on the test car: 16 kHz playback came out stretched and
+# late, an 8 kHz mic sounded robotic to the other side. They differ, so AutoKit's echo canceller is off; callaudio.py ducks the mic instead.
+CALL_PLAY_DEC = int(os.environ.get("AA_CALL_PLAY_DEC", "3"))
+CALL_MIC_DEC = int(os.environ.get("AA_CALL_MIC_DEC", "5"))
 
 
 def double_rate(pcm, last):
@@ -144,22 +147,21 @@ class App:
             self.call_active = True
             self._call_last = 0
             for c in (4, 1):        # PHONECALL_START, then OUTPUT_START: AutoKit only sets up its call player on the second one
-                self.box.send(T_AUDIO, struct.pack("<IfI", CALL_DEC, 0.0, 1) + bytes([c]), droppable=False)
-            if not self.mic_on:     # car microphone on, in the SAME format as the playback: AutoKit feeds its echo canceller
-                                    # the played audio only when the two decode types match; otherwise the caller hears themselves
-                self.box.send(T_AUDIO, struct.pack("<IfI", CALL_DEC, 0.0, 1) + bytes([3]), droppable=False)
+                self.box.send(T_AUDIO, struct.pack("<IfI", CALL_PLAY_DEC, 0.0, 1) + bytes([c]), droppable=False)
+            if not self.mic_on:     # car microphone on
+                self.box.send(T_AUDIO, struct.pack("<IfI", CALL_MIC_DEC, 0.0, 1) + bytes([3]), droppable=False)
                 self.box.send(T_CMD, struct.pack("<I", 1), droppable=False)
                 self.mic_on = self.call_mic = True
                 self.mic_chunks = 0
             log("call: audio link up -> car told call start + record")
         elif kind == b"A" and self.call_active:
-            if CALL_DEC == 5:
+            if CALL_PLAY_DEC == 5:
                 body, self._call_last = double_rate(body, self._call_last)
-            self.box.send(T_AUDIO, struct.pack("<IfI", CALL_DEC, 0.0, 1) + body)
+            self.box.send(T_AUDIO, struct.pack("<IfI", CALL_PLAY_DEC, 0.0, 1) + body)
         elif kind == b"E" and self.call_active:
             self.call_active = False
             for c in (2, 5):        # OUTPUT_STOP (stops the player and drops what is queued), then PHONECALL_STOP
-                self.box.send(T_AUDIO, struct.pack("<IfI", CALL_DEC, 0.0, 1) + bytes([c]), droppable=False)
+                self.box.send(T_AUDIO, struct.pack("<IfI", CALL_PLAY_DEC, 0.0, 1) + bytes([c]), droppable=False)
             if self.call_mic:
                 self.box.send(T_CMD, struct.pack("<I", 2), droppable=False)
                 self.mic_on = self.call_mic = False

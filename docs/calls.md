@@ -14,10 +14,19 @@ caller <-> phone ==Bluetooth SCO (8 kHz mono)==> Beagle (aa_bt.py + callaudio.py
 
 * `callaudio.py` (inside `aa_bt.py`): answers the headset link's AT commands with `OK`, listens for the phone's SCO connection,
   sends the caller's voice (8 kHz s16 mono) to the bridge, and writes the car's microphone back into SCO packet by packet.
-* `standalone.py`: on call start sends the car an audio message `(decodeType 5 = 16 kHz mono, audioType 1)` with command 4
-  (PHONECALL_START) then command 1 (OUTPUT_START, which is what sets up AutoKit's call player), tells the car to record the microphone (INPUT_CONFIG + Command 1), streams the caller's voice (doubled to 16 kHz) as audio
-  messages, and returns the car mic. Call audio on the car link is 16 kHz mono (decodeType 5; `AA_CALL_DEC=3` selects 8 kHz), the same for playback and mic. At 8 kHz the far side reported a robotic voice. The two must match: AutoKit feeds its WebRTC echo canceller the played audio only when the two decode types match, so a mismatch makes callers hear themselves. On the end it sends command 2 (OUTPUT_STOP), command 5 (PHONECALL_STOP) and
-  Command 2.
+* `standalone.py`: on call start sends the car an audio message `(decodeType 3 = 8 kHz mono, audioType 1)` with command 4
+  (PHONECALL_START) then command 1 (OUTPUT_START, which is what sets up AutoKit's call player), tells the car to record the microphone (INPUT_CONFIG + Command 1), streams the caller's voice as audio
+  messages, and returns the car mic. Formats on the car link are set from what the test car did:
+
+  | Playback | Mic | Result on the car |
+  |---|---|---|
+  | 8 kHz | 16 kHz | both sides clear; the caller hears an echo (AutoKit's canceller is off) |
+  | 8 kHz | 8 kHz | the other side hears a robotic voice |
+  | 16 kHz | 16 kHz | the other side is clear; playback is stretched, late and outlives the call |
+
+  The default is the first row (`AA_CALL_PLAY_DEC=3`, `AA_CALL_MIC_DEC=5`). AutoKit feeds its echo canceller only when the two
+  decode types match, so `callaudio.py` suppresses the echo itself: it turns the mic down while the caller is talking
+  (`AA_CALL_DUCK`, `AA_CALL_DUCK_LEVEL`, `AA_CALL_DUCK_HOLD`). This is half-duplex, like a speakerphone.
 * Enable with `AA_CALLS=1` in `/etc/beagle-aa-bridge/env`, then restart `aa-bt` and `standalone`.
 
 ## What the phone is told
