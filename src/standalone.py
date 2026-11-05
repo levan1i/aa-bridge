@@ -9,7 +9,7 @@
 * video: AA H.264 -> Carlinkit video messages; audio: AA PCM -> Carlinkit audio messages; touch: car -> AA input.
 Run as root on the Beagle. Phone: Android Auto 'Start head unit server' (until the Bluetooth start-up works again).
 """
-import argparse, array, asyncio, json, os, socket, struct, sys, threading, time
+import argparse, array, asyncio, json, os, socket, struct, sys, threading, time, uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -142,6 +142,7 @@ class App:
     call_state = "idle"                  # from the phone's status: "idle", "ringing" or "active"
     call_dir = 2                         # 1 incoming, 2 outgoing
     call_info = None                     # last caller details sent to the car
+    call_id = None
 
     def call_audio_cmd(self, *cmds):
         self._alast = time.time()                            # the car answers these with its own play/pause too
@@ -160,15 +161,18 @@ class App:
         self.call_car = want
 
     def call_send_info(self, status, name="", number=""):
-        if not status and self.call_info is None:
-            return                                           # nothing was announced, so nothing to end
+        """MetaData message, subtype 100, as a real dongle sends it: plain (0x2A is never encrypted), {"CallStatus":0} when idle."""
         info = {"CallStatus": status}
         if status:
-            info.update(CallDirection=self.call_dir, CallName=name, CallNumber=number)
+            if not self.call_id:
+                self.call_id = str(uuid.uuid4()).upper()     # one per call
+            info.update(CallDirection=self.call_dir, CallID=self.call_id, CallName=name or number, CallNumber=number)
+        else:
+            self.call_id = None
         if CALL_INFO and info != self.call_info:
-            self.box.send(0x2A, struct.pack("<I", 100) + json.dumps(info, ensure_ascii=False).encode() + b"\0", droppable=False)
+            self.box.send(0x2A, struct.pack("<I", 100) + json.dumps(info, ensure_ascii=False, separators=(",", ":")).encode() + b"\0", plain=True, droppable=False)
             log("call: details sent to the car (status %d)" % status)
-        self.call_info = info if status else None
+        self.call_info = info
 
     def on_phone_status(self, calls):
         """The phone's call list: the only signal that exists before the audio link, so it drives ringing and hanging up."""
@@ -464,6 +468,7 @@ class App:
     async def run_session(self, r, w, how):
         s = aas.AASession(r, w, on_video=self.on_video, on_audio=self.on_audio, mode=aas.compute_mode(*self.car_size), on_mic=self.on_mic, night=self.want_night(), on_phone_status=self.on_phone_status)
         self.session = s
+        self.call_info = None                # a new session starts with {"CallStatus":0}, as on a real dongle
         log("phone session started (%s), video mode for car display %dx%d: res %d frame %dx%d ui %dx%d" % ((how,) + self.car_size + (s.mode["res"], s.mode["fw"], s.mode["fh"], s.mode["uw"], s.mode["uh"])))
         task = asyncio.ensure_future(s.run())
         wd = asyncio.ensure_future(self.audio_watchdog())
