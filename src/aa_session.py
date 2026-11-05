@@ -57,8 +57,10 @@ BULK, FIRST, MIDDLE, LAST = 3, 1, 0, 2
 F_CTRL, F_ENC = 0x04, 0x08
 MAX_FRAME = 0x4000
 
-CH_CONTROL, CH_INPUT, CH_SENSOR, CH_VIDEO, CH_MEDIA, CH_SPEECH, CH_SYSTEM, CH_MIC, CH_BT, CH_PHONE = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9
-CH_NAMES = {0: "control", 1: "input", 2: "sensor", 3: "video", 4: "media-audio", 5: "speech-audio", 6: "system-audio", 7: "mic", 8: "bluetooth", 9: "phone-status"}
+CH_CONTROL, CH_INPUT, CH_SENSOR, CH_VIDEO, CH_MEDIA, CH_SPEECH, CH_SYSTEM, CH_MIC, CH_BT, CH_PHONE, CH_MEDIAINFO = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+CH_NAMES = {0: "control", 1: "input", 2: "sensor", 3: "video", 4: "media-audio", 5: "speech-audio", 6: "system-audio", 7: "mic", 8: "bluetooth", 9: "phone-status", 10: "media-info"}
+MEDIA_INFO = os.environ.get("AA_MEDIA_INFO", "1") == "1"   # ask the phone for what is playing, and pass it on to the car
+PLAYBACK_STATES = {1: "STOPPED", 2: "PLAYING", 3: "PAUSED"}
 CALLS = os.environ.get("AA_CALLS", "0") == "1"             # the car can really carry calls (see callaudio.py)
 CALL_STATES = {0: "UNKNOWN", 1: "IN_CALL", 2: "ON_HOLD", 3: "INACTIVE", 4: "INCOMING", 5: "CONFERENCED", 6: "MUTED"}
 
@@ -143,6 +145,19 @@ def phone_calls(body):
     return calls
 
 
+def media_status(body):
+    """MediaPlaybackStatus (0x8001) -> {state, source, position}."""
+    f = dict(pb_fields(body))
+    return {"state": PLAYBACK_STATES.get(f.get(1), "UNKNOWN"), "source": bytes(f.get(2, b"")).decode(errors="replace"), "position": f.get(3, 0)}
+
+
+def media_metadata(body):
+    """MediaPlaybackMetadata (0x8003) -> {title, artist, album, art, duration}."""
+    f = dict(pb_fields(body))
+    t = lambda n: bytes(f.get(n, b"")).decode(errors="replace")
+    return {"title": t(1), "artist": t(2), "album": t(3), "art": bytes(f.get(4, b"")), "duration": f.get(6, 0)}
+
+
 def phone_status_text(calls):
     """For the log: "IN_CALL 12s" per call. Numbers and names are deliberately left out."""
     return ", ".join("%s %ds" % (c["state"], c["seconds"]) for c in calls) or "no calls"
@@ -174,7 +189,8 @@ def bt_address():
 
 
 class AASession:
-    def __init__(self, reader, writer, on_video=None, on_audio=None, name="phone", mode=None, on_mic=None, night=False, on_phone_status=None):
+    def __init__(self, reader, writer, on_video=None, on_audio=None, name="phone", mode=None, on_mic=None, night=False, on_phone_status=None, on_media=None):
+        self.on_media = on_media                   # called with ("status", {...}) or ("metadata", {...}) from the phone
         self.on_phone_status = on_phone_status     # called with the phone's list of calls whenever it reports them
         self.on_mic = on_mic                       # called with True/False when the phone opens/closes the microphone
         self.mic_open = False
@@ -435,6 +451,9 @@ class AASession:
         c.av_input_channel.audio_config.sample_rate = 16000
         c.av_input_channel.audio_config.bit_depth = 16
         c.av_input_channel.audio_config.channel_count = 1
+        if MEDIA_INFO:                                      # media info: empty descriptor (field 9), a marker with no settings
+            c = r.channels.add(); c.channel_id = CH_MEDIAINFO
+            c.MergeFromString(b"\x4a\x00")
         if CALLS:                                           # phone status: empty descriptor (field 10), a marker with no settings
             c = r.channels.add(); c.channel_id = CH_PHONE
             c.MergeFromString(b"\x52\x00")
@@ -472,6 +491,14 @@ class AASession:
                     self.call_avail_sent = True
                     await self.send_msg(CH_CONTROL, 24, b"\x08\x01")          # CallAvailabilityStatus{call_available=true}
                     log("-> CallAvailabilityStatus: calls available")
+            return
+        if ch == CH_MEDIAINFO:
+            if self.on_media and mid == 0x8001:
+                self.on_media("status", media_status(body))
+            elif self.on_media and mid == 0x8003:
+                self.on_media("metadata", media_metadata(body))
+            elif mid not in (0x8001, 0x8003):
+                log("<- media-info msg 0x%04x (%d bytes)" % (mid, len(body)))
             return
         if ch == CH_PHONE:
             if mid == 0x8001:                                           # PhoneStatusUpdate

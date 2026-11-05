@@ -47,3 +47,12 @@ RFCOMM exchange: `WifiStartRequest(ip, port 5288)` → `WifiInfoRequest` → `Wi
 * Microphone: when the phone opens the mic channel the box sends an audio message `(decodeType 5, 0.0, audioType 1)` with command byte 3 (16 kHz mono 16-bit), then Command 1 (start recording). The car answers with audio messages `(decodeType 5, vol, audioType 3)` + raw PCM (chunks of at least ~2560 bytes), which go to the phone as mic-channel media (8-byte big-endian microsecond timestamp + PCM). Command 2 stops recording.
 * Media keys (car to box, Command): 200 home, 201 play, 202 pause, 203 play/pause, 204 next, 205 previous, 300 answer, 301 hang up. After an audio stop the car app sends 201/202 itself (auto-resume); these are not button presses.
 * Day/night: the car sends `SendFile /tmp/night_mode` (4-byte value; 0 day, 1 night, 2 = let the box decide) and `{"DayNightMode":2}`; Command 16 = night, 17 = day when its theme changes. The box supplies the Android Auto NIGHT_DATA sensor event.
+
+## What is playing (phone to car)
+
+The head unit offers the media info channel (descriptor field 9, no settings). The phone then sends MediaPlaybackStatus (0x8001:
+1 state, 2 PLAYING / 1 STOPPED / 3 PAUSED; 2 app name; 3 seconds) about once a second, and MediaPlaybackMetadata (0x8003: 1 title,
+2 artist, 3 album, 4 art, 6 duration in seconds) on a track change. These become box message 0x2A, never encrypted, `<I subtype>` +
+content. Subtype 1 is JSON + NUL: `MediaAPPName`, `MediaSongName`, `MediaArtistName`, `MediaAlbumName`, `MediaSongDuration` (ms),
+`MediaSongPlayTime` (ms) on a track change, then `MediaSongPlayTime` and `MediaPlayStatus` (1 playing). Subtype 2 is PNG art and 3 is
+JPEG art. `AA_MEDIA_INFO=0` stops offering the channel.

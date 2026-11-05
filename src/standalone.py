@@ -43,6 +43,7 @@ NIGHT_TO = int(os.environ.get("AA_NIGHT_TO", "7"))       # hour night ends
 
 # Call formats on the car link (3 = 8 kHz mono, 5 = 16 kHz mono), as observed on the test car: 16 kHz playback came out stretched and
 # late, an 8 kHz mic sounded robotic to the other side. They differ, so AutoKit's echo canceller is off; callaudio.py ducks the mic instead.
+MEDIA_ART_MAX = 512 * 1024
 CALL_INFO = os.environ.get("AA_CALL_INFO", "1") == "1"   # send the car the caller details message (type 42, subtype 100)
 CALL_CTL = ("127.0.0.1", int(os.environ.get("AA_CALL_PORT_CTL", "5292")))    # commands for the Bluetooth headset link (aa_bt)
 CALL_PLAY_DEC = int(os.environ.get("AA_CALL_PLAY_DEC", "3"))
@@ -423,6 +424,32 @@ class App:
         self._aon[atype] = now
         self.box.send(boxd.T_AUDIO, struct.pack("<IfI", dec, 0.0, atype) + pcm)
 
+    # -------------------------------------------------- what is playing, phone -> car
+    media_source = ""
+    media_state = None
+
+    def media_json(self, info, droppable):
+        """MetaData message, subtype 1: plain JSON + NUL, the same as a real dongle sends in Android Auto mode."""
+        if self.box and self.car_ready:
+            self.box.send(0x2A, struct.pack("<I", 1) + json.dumps(info, ensure_ascii=False, separators=(",", ":")).encode() + b"\0",
+                          plain=True, droppable=droppable)
+
+    def on_media(self, kind, m):
+        if kind == "status":
+            self.media_source = m["source"] or self.media_source
+            if m["state"] != self.media_state:
+                self.media_state = m["state"]
+                log("media: %s (%s)" % (m["state"], m["source"]))
+            self.media_json({"MediaSongPlayTime": m["position"] * 1000, "MediaPlayStatus": 1 if m["state"] == "PLAYING" else 0}, True)
+            return
+        self.media_json({"MediaAPPName": self.media_source, "MediaSongName": m["title"], "MediaArtistName": m["artist"],
+                         "MediaAlbumName": m["album"], "MediaSongDuration": m["duration"] * 1000, "MediaSongPlayTime": 0}, False)
+        art = m["art"]
+        if art and len(art) <= MEDIA_ART_MAX and self.box and self.car_ready:
+            sub = 2 if art[:4] == b"\x89PNG" else 3          # Android Auto captures show PNG as 2, CarPlay JPEG as 3
+            self.box.send(0x2A, struct.pack("<I", sub) + art, plain=True, droppable=True)
+        log("media: track details sent to the car (%d bytes of art)" % len(art))
+
     # -------------------------------------------------- buttons car -> phone
     # box protocol Command value -> Android keycode (steering-wheel / head-unit media keys)
     KEYMAP = {200: 3, 201: 126, 202: 127, 203: 85, 204: 87, 205: 88, 106: 4}   # home, play, pause, play/pause, next, prev, back
@@ -466,7 +493,7 @@ class App:
 
     # -------------------------------------------------- phone session loop
     async def run_session(self, r, w, how):
-        s = aas.AASession(r, w, on_video=self.on_video, on_audio=self.on_audio, mode=aas.compute_mode(*self.car_size), on_mic=self.on_mic, night=self.want_night(), on_phone_status=self.on_phone_status)
+        s = aas.AASession(r, w, on_video=self.on_video, on_audio=self.on_audio, mode=aas.compute_mode(*self.car_size), on_mic=self.on_mic, night=self.want_night(), on_phone_status=self.on_phone_status, on_media=self.on_media)
         self.session = s
         self.call_info = None                # a new session starts with {"CallStatus":0}, as on a real dongle
         log("phone session started (%s), video mode for car display %dx%d: res %d frame %dx%d ui %dx%d" % ((how,) + self.car_size + (s.mode["res"], s.mode["fw"], s.mode["fh"], s.mode["uw"], s.mode["uh"])))
