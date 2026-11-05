@@ -38,6 +38,20 @@ caller <-> phone ==Bluetooth SCO (8 kHz mono)==> Beagle (aa_bt.py + callaudio.py
   phone status channel (descriptor field 10, no settings). `PhoneStatusUpdate` (0x8001) is logged as state and duration only;
   numbers and names are not logged.
 
+## Call signalling to the car
+
+The phone's status drives the car, because it is the only signal before the audio link exists:
+
+* `INCOMING` -> audio command 14; in a call -> 4; no calls and no audio link -> 5. App calls (Meet, Messenger) report no status, so
+  for them the audio link alone drives 4 and 5.
+* Caller details: message type 0x2A, `<I 100>` + JSON + NUL with `CallStatus` (2 ringing, 4 active, 0 ended), `CallDirection` (1 in,
+  2 out), `CallName`, `CallNumber`. Only captured from a real dongle for CarPlay, so the car may ignore it; `AA_CALL_INFO=0` turns
+  it off. Numbers and names are not logged.
+* Car commands 300 (answer) and 301 (hang up) become Android keys 5 and 6. If the phone's state has not changed a second later,
+  `AT+CKPD=200` presses the headset button. That button toggles, so it is never used to reject a ringing call.
+
+Real dongles also send audio commands 12/13 around the ringtone; these are not sent.
+
 ## Tested so far
 
 Normal phone calls and Facebook Messenger calls work through the car's speakers and microphone (SCO link, about 340 packets/s

@@ -8,6 +8,7 @@ The phone treats the Beagle as a car kit (HSP headset). During a call it opens a
 
 UDP protocol, 127.0.0.1 only:   aa_bt -> bridge (port CALL_TO_BRIDGE):  b"S" call audio started | b"E" ended | b"A"+PCM 8 kHz s16
                                  bridge -> aa_bt (port CALL_FROM_BRIDGE): raw PCM 8 kHz s16 mono (car microphone)
+                                 bridge -> aa_bt (port CALL_CTL): b"CKPD" press the headset button (answers, or hangs up)
 Off unless AA_CALLS=1.
 """
 import array
@@ -20,6 +21,7 @@ import time
 ENABLED = os.environ.get("AA_CALLS", "0") == "1"
 CALL_TO_BRIDGE = int(os.environ.get("AA_CALL_PORT_OUT", "5290"))
 CALL_FROM_BRIDGE = int(os.environ.get("AA_CALL_PORT_IN", "5291"))
+CALL_CTL = int(os.environ.get("AA_CALL_PORT_CTL", "5292"))
 SCO_BATCH = 320                  # bytes (20 ms at 8 kHz) per UDP datagram; SCO packets are small (typ. 48 bytes)
 MIC_CAP = 8000 * 2 // 2          # keep at most 0.5 s of car microphone audio
 MIC_GAIN = float(os.environ.get("AA_CALL_MIC_GAIN", "6"))     # the car mic arrives quiet; phone apps can mistake it for noise
@@ -71,13 +73,35 @@ class CallAudio:
         self.out = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.active = False
         self.fill = 0
+        self.rfcomm = None
         self.sco_listener = None
 
     # -------------------------------------------------------------- headset RFCOMM link (HSP)
     def attach_rfcomm(self, sock):
         threading.Thread(target=self._rfcomm, args=(sock,), daemon=True).start()
 
+    def press_button(self):
+        """HSP headset button: the phone answers a ringing call, or ends the current one."""
+        if not self.rfcomm:
+            self.log("headset button: no headset link")
+            return
+        try:
+            self.rfcomm.sendall(b"AT+CKPD=200\r")
+            self.log("headset link -> AT+CKPD=200")
+        except OSError as e:
+            self.log("headset button failed: %r" % e)
+
+    def _ctl_receiver(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", CALL_CTL))
+        while True:
+            d, _ = s.recvfrom(64)
+            if d == b"CKPD":
+                self.press_button()
+
     def _rfcomm(self, sock):
+        self.rfcomm = sock
         sock.settimeout(None)
         buf = b""
         try:
@@ -100,6 +124,7 @@ class CallAudio:
     def start(self, adapter_addr):
         """Listen for the phone's SCO connection on the local adapter, and for the car microphone from the bridge."""
         threading.Thread(target=self._mic_receiver, daemon=True).start()
+        threading.Thread(target=self._ctl_receiver, daemon=True).start()
         try:
             ls = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_SCO)
             ls.bind(adapter_addr)

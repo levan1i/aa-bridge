@@ -132,14 +132,20 @@ def _rd_varint(b, i):
             return v, i
 
 
-def phone_status_text(body):
-    """PhoneStatusUpdate -> "IN_CALL 12s" per call. Numbers and names are deliberately not logged."""
+def phone_calls(body):
+    """PhoneStatusUpdate -> [{state, seconds, number, name}]."""
     calls = []
     for f, v in pb_fields(body):
         if f == 1:
             c = dict(pb_fields(v))
-            calls.append("%s %ds" % (CALL_STATES.get(c.get(1), c.get(1)), c.get(2, 0)))
-    return ", ".join(calls) or "no calls"
+            calls.append({"state": CALL_STATES.get(c.get(1), "UNKNOWN"), "seconds": c.get(2, 0),
+                          "number": bytes(c.get(3, b"")).decode(errors="replace"), "name": bytes(c.get(4, b"")).decode(errors="replace")})
+    return calls
+
+
+def phone_status_text(calls):
+    """For the log: "IN_CALL 12s" per call. Numbers and names are deliberately left out."""
+    return ", ".join("%s %ds" % (c["state"], c["seconds"]) for c in calls) or "no calls"
 
 
 def additional_video_config(insets):
@@ -168,7 +174,8 @@ def bt_address():
 
 
 class AASession:
-    def __init__(self, reader, writer, on_video=None, on_audio=None, name="phone", mode=None, on_mic=None, night=False):
+    def __init__(self, reader, writer, on_video=None, on_audio=None, name="phone", mode=None, on_mic=None, night=False, on_phone_status=None):
+        self.on_phone_status = on_phone_status     # called with the phone's list of calls whenever it reports them
         self.on_mic = on_mic                       # called with True/False when the phone opens/closes the microphone
         self.mic_open = False
         self.night = night
@@ -468,7 +475,10 @@ class AASession:
             return
         if ch == CH_PHONE:
             if mid == 0x8001:                                           # PhoneStatusUpdate
-                log("<- phone status:", phone_status_text(body))
+                calls = phone_calls(body)
+                log("<- phone status:", phone_status_text(calls))
+                if self.on_phone_status:
+                    self.on_phone_status(calls)
             else:
                 log("<- phone-status msg 0x%04x (%d bytes): %s" % (mid, len(body), body[:32].hex()))
             return

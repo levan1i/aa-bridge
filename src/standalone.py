@@ -43,6 +43,8 @@ NIGHT_TO = int(os.environ.get("AA_NIGHT_TO", "7"))       # hour night ends
 
 # Call formats on the car link (3 = 8 kHz mono, 5 = 16 kHz mono), as observed on the test car: 16 kHz playback came out stretched and
 # late, an 8 kHz mic sounded robotic to the other side. They differ, so AutoKit's echo canceller is off; callaudio.py ducks the mic instead.
+CALL_INFO = os.environ.get("AA_CALL_INFO", "1") == "1"   # send the car the caller details message (type 42, subtype 100)
+CALL_CTL = ("127.0.0.1", int(os.environ.get("AA_CALL_PORT_CTL", "5292")))    # commands for the Bluetooth headset link (aa_bt)
 CALL_PLAY_DEC = int(os.environ.get("AA_CALL_PLAY_DEC", "3"))
 CALL_MIC_DEC = int(os.environ.get("AA_CALL_MIC_DEC", "5"))
 
@@ -134,8 +136,82 @@ class App:
         self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self.sync_car()))
 
     # -------------------------------------------------- phone calls (the Beagle is the phone's Bluetooth headset; see callaudio.py)
-    call_active = False
+    call_active = False                  # the Bluetooth call audio link is up
     call_mic = False
+    call_car = None                      # what the car was told: None, "ringing" (14) or "active" (4)
+    call_state = "idle"                  # from the phone's status: "idle", "ringing" or "active"
+    call_dir = 2                         # 1 incoming, 2 outgoing
+    call_info = None                     # last caller details sent to the car
+
+    def call_audio_cmd(self, *cmds):
+        for c in cmds:
+            self.box.send(T_AUDIO, struct.pack("<IfI", CALL_PLAY_DEC, 0.0, 1) + bytes([c]), droppable=False)
+
+    def call_tell_car(self, want):
+        """Keep the car's idea of the call in step: 14 incoming, 4 call start, 5 call stop (each sent once)."""
+        if want == self.call_car:
+            return
+        if want is None:
+            self.call_audio_cmd(5)
+        else:
+            self.call_audio_cmd(14 if want == "ringing" else 4)
+        log("call: car told %s" % (want or "no call"))
+        self.call_car = want
+
+    def call_send_info(self, status, name="", number=""):
+        if not status and self.call_info is None:
+            return                                           # nothing was announced, so nothing to end
+        info = {"CallStatus": status}
+        if status:
+            info.update(CallDirection=self.call_dir, CallName=name, CallNumber=number)
+        if CALL_INFO and info != self.call_info:
+            self.box.send(0x2A, struct.pack("<I", 100) + json.dumps(info, ensure_ascii=False).encode() + b"\0", droppable=False)
+            log("call: details sent to the car (status %d)" % status)
+        self.call_info = info if status else None
+
+    def on_phone_status(self, calls):
+        """The phone's call list: the only signal that exists before the audio link, so it drives ringing and hanging up."""
+        if not self.box or not self.car_is_open:
+            return
+        live = [c for c in calls if c["state"] not in ("INACTIVE", "UNKNOWN")]
+        ring = [c for c in live if c["state"] == "INCOMING"]
+        if ring:
+            self.call_state, self.call_dir = "ringing", 1
+            self.call_tell_car("active" if self.call_active else "ringing")
+            self.call_send_info(2, ring[0]["name"], ring[0]["number"])
+        elif live:
+            if self.call_state == "idle":
+                self.call_dir = 2                            # never rang here: we placed it
+            self.call_state = "active"
+            self.call_tell_car("active")
+            self.call_send_info(4, live[0]["name"], live[0]["number"])
+        else:
+            self.call_state, self.call_dir = "idle", 2
+            self.call_send_info(0)
+            if not self.call_active:                         # app calls (Meet...) report nothing: their audio link decides
+                self.call_tell_car(None)
+
+    def call_key(self, v):
+        """Car answer (300) / hang up (301) -> the phone, by Android key; the headset button if the phone's state does not change."""
+        s, state = self.session, self.call_state
+        if v == 300 and state != "ringing":
+            log("car answer button ignored: nothing is ringing")
+            return
+        if v == 301 and state == "idle" and not self.call_active:
+            log("car hang-up button ignored: no call")
+            return
+        key = 5 if v == 300 else 6
+        log("car call button %d -> Android key %d" % (v, key))
+        if s and s.alive:
+            asyncio.run_coroutine_threadsafe(s.send_key(key), self.loop)
+        # The headset button toggles: while ringing it answers, in a call it hangs up. So never use it to reject a ringing call.
+        if (v == 300 and state == "ringing") or (v == 301 and state == "active"):
+            self.loop.call_soon_threadsafe(self.loop.call_later, 1.0, self.call_key_fallback, state)
+
+    def call_key_fallback(self, state):
+        if self.call_state == state:
+            log("call: phone state unchanged after the key, pressing the headset button")
+            self._call_sock.sendto(b"CKPD", CALL_CTL)
     CALL_OUT = ("127.0.0.1", int(os.environ.get("AA_CALL_PORT_IN", "5291")))      # car mic -> aa_bt (SCO)
 
     def call_datagram(self, data):
@@ -146,8 +222,8 @@ class App:
         if kind == b"S":
             self.call_active = True
             self._call_last = 0
-            for c in (4, 1):        # PHONECALL_START, then OUTPUT_START: AutoKit only sets up its call player on the second one
-                self.box.send(T_AUDIO, struct.pack("<IfI", CALL_PLAY_DEC, 0.0, 1) + bytes([c]), droppable=False)
+            self.call_tell_car("active")
+            self.call_audio_cmd(1)  # OUTPUT_START: AutoKit only sets up its call player on this
             if not self.mic_on:     # car microphone on
                 self.box.send(T_AUDIO, struct.pack("<IfI", CALL_MIC_DEC, 0.0, 1) + bytes([3]), droppable=False)
                 self.box.send(T_CMD, struct.pack("<I", 1), droppable=False)
@@ -160,11 +236,12 @@ class App:
             self.box.send(T_AUDIO, struct.pack("<IfI", CALL_PLAY_DEC, 0.0, 1) + body)
         elif kind == b"E" and self.call_active:
             self.call_active = False
-            for c in (2, 5):        # OUTPUT_STOP (stops the player and drops what is queued), then PHONECALL_STOP
-                self.box.send(T_AUDIO, struct.pack("<IfI", CALL_PLAY_DEC, 0.0, 1) + bytes([c]), droppable=False)
+            self.call_audio_cmd(2)  # OUTPUT_STOP: stops the player and drops what is queued
             if self.call_mic:
                 self.box.send(T_CMD, struct.pack("<I", 2), droppable=False)
                 self.mic_on = self.call_mic = False
+            if self.call_state == "idle":
+                self.call_tell_car(None)
             log("call: audio link down -> car told call stop")
 
     def call_mic_audio(self, pcm, dec):
@@ -351,6 +428,9 @@ class App:
             log("car reports %s" % ("night" if self.car_night else "day"))
             self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self.update_night()))
             return
+        if v in (300, 301):
+            self.call_key(v)
+            return
         key = self.KEYMAP.get(v)
         if v in (201, 202) and time.time() - self._alast < 1.5:
             log("car play/pause %d right after an audio command: the car's own auto-resume, not forwarded" % v)
@@ -381,7 +461,7 @@ class App:
 
     # -------------------------------------------------- phone session loop
     async def run_session(self, r, w, how):
-        s = aas.AASession(r, w, on_video=self.on_video, on_audio=self.on_audio, mode=aas.compute_mode(*self.car_size), on_mic=self.on_mic, night=self.want_night())
+        s = aas.AASession(r, w, on_video=self.on_video, on_audio=self.on_audio, mode=aas.compute_mode(*self.car_size), on_mic=self.on_mic, night=self.want_night(), on_phone_status=self.on_phone_status)
         self.session = s
         log("phone session started (%s), video mode for car display %dx%d: res %d frame %dx%d ui %dx%d" % ((how,) + self.car_size + (s.mode["res"], s.mode["fw"], s.mode["fh"], s.mode["uw"], s.mode["uh"])))
         task = asyncio.ensure_future(s.run())
@@ -393,6 +473,7 @@ class App:
             await self.announce_phone(self.sid)
         await task
         wd.cancel(); nl.cancel()
+        self.on_phone_status([])
         for a in list(self._aact):
             self.audio_stop(a)
         log("phone session ended")
