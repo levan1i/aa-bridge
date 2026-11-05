@@ -57,8 +57,10 @@ BULK, FIRST, MIDDLE, LAST = 3, 1, 0, 2
 F_CTRL, F_ENC = 0x04, 0x08
 MAX_FRAME = 0x4000
 
-CH_CONTROL, CH_INPUT, CH_SENSOR, CH_VIDEO, CH_MEDIA, CH_SPEECH, CH_SYSTEM, CH_MIC, CH_BT = 0, 1, 2, 3, 4, 5, 6, 7, 8
-CH_NAMES = {0: "control", 1: "input", 2: "sensor", 3: "video", 4: "media-audio", 5: "speech-audio", 6: "system-audio", 7: "mic", 8: "bluetooth"}
+CH_CONTROL, CH_INPUT, CH_SENSOR, CH_VIDEO, CH_MEDIA, CH_SPEECH, CH_SYSTEM, CH_MIC, CH_BT, CH_PHONE = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9
+CH_NAMES = {0: "control", 1: "input", 2: "sensor", 3: "video", 4: "media-audio", 5: "speech-audio", 6: "system-audio", 7: "mic", 8: "bluetooth", 9: "phone-status"}
+CALLS = os.environ.get("AA_CALLS", "0") == "1"             # the car can really carry calls (see callaudio.py)
+CALL_STATES = {0: "UNKNOWN", 1: "IN_CALL", 2: "ON_HOLD", 3: "INACTIVE", 4: "INCOMING", 5: "CONFERENCED", 6: "MUTED"}
 
 # Video mode offered to the phone is derived from the car's Open request (see compute_mode); fps is fixed at 30.
 VIDEO_FPS = 1                                              # 1 = 30 fps
@@ -99,6 +101,47 @@ def _varint(n):
             return bytes(out)
 
 
+def pb_fields(b):
+    """Minimal protobuf reader: yields (field number, value) for varint and length-delimited fields."""
+    i = 0
+    while i < len(b):
+        key, i = _rd_varint(b, i)
+        f, w = key >> 3, key & 7
+        if w == 0:
+            v, i = _rd_varint(b, i)
+        elif w == 2:
+            n, i = _rd_varint(b, i)
+            v, i = b[i:i + n], i + n
+        elif w == 1:
+            v, i = b[i:i + 8], i + 8
+        elif w == 5:
+            v, i = b[i:i + 4], i + 4
+        else:
+            return
+        yield f, v
+
+
+def _rd_varint(b, i):
+    v = s = 0
+    while True:
+        c = b[i]
+        i += 1
+        v |= (c & 0x7F) << s
+        s += 7
+        if not c & 0x80:
+            return v, i
+
+
+def phone_status_text(body):
+    """PhoneStatusUpdate -> "IN_CALL 12s" per call. Numbers and names are deliberately not logged."""
+    calls = []
+    for f, v in pb_fields(body):
+        if f == 1:
+            c = dict(pb_fields(v))
+            calls.append("%s %ds" % (CALL_STATES.get(c.get(1), c.get(1)), c.get(2, 0)))
+    return ", ".join(calls) or "no calls"
+
+
 def additional_video_config(insets):
     """Raw protobuf for VideoConfig field 11: AdditionalVideoConfig{ display_insets{top,bottom,left,right} }."""
     top, bottom, left, right = (int(x) for x in insets.split(","))
@@ -129,6 +172,7 @@ class AASession:
         self.on_mic = on_mic                       # called with True/False when the phone opens/closes the microphone
         self.mic_open = False
         self.night = night
+        self.call_avail_sent = False
         self.mode = mode or compute_mode(1920, 720)
         self.r, self.w, self.name = reader, writer, name
         self.on_video, self.on_audio = on_video, on_audio
@@ -384,6 +428,9 @@ class AASession:
         c.av_input_channel.audio_config.sample_rate = 16000
         c.av_input_channel.audio_config.bit_depth = 16
         c.av_input_channel.audio_config.channel_count = 1
+        if CALLS:                                           # phone status: empty descriptor (field 10), a marker with no settings
+            c = r.channels.add(); c.channel_id = CH_PHONE
+            c.MergeFromString(b"\x52\x00")
         # bluetooth: wireless Android Auto expects the head unit's Bluetooth address (the phone is paired with it)
         bt = bt_address()
         if bt:
@@ -411,9 +458,19 @@ class AASession:
         if ch == CH_BT:
             if mid == 0x8001:                                           # PAIRING_REQUEST
                 q = btreq.BluetoothPairingRequest(); q.ParseFromString(body)
-                rs = btresp.BluetoothPairingResponse(); rs.already_paired = True; rs.status = 1
-                await self.send_msg(ch, 0x8002, rs)
-                log("<- bluetooth PAIRING_REQUEST phone=%s method=%d -> already paired" % (q.phone_address, q.pairing_method))
+                # Written by hand: the aasdk .proto has these two fields swapped. Real layout: 1 = status (0 SUCCESS), 2 = already_paired.
+                await self.send_msg(ch, 0x8002, b"\x08\x00\x10\x01")
+                log("<- bluetooth PAIRING_REQUEST phone=%s method=%d -> success, already paired" % (q.phone_address, q.pairing_method))
+                if CALLS and not self.call_avail_sent:
+                    self.call_avail_sent = True
+                    await self.send_msg(CH_CONTROL, 24, b"\x08\x01")          # CallAvailabilityStatus{call_available=true}
+                    log("-> CallAvailabilityStatus: calls available")
+            return
+        if ch == CH_PHONE:
+            if mid == 0x8001:                                           # PhoneStatusUpdate
+                log("<- phone status:", phone_status_text(body))
+            else:
+                log("<- phone-status msg 0x%04x (%d bytes): %s" % (mid, len(body), body[:32].hex()))
             return
         if ch == CH_INPUT:
             if mid == 0x8002:                                           # BINDING_REQUEST
