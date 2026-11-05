@@ -144,6 +144,7 @@ class App:
     call_info = None                     # last caller details sent to the car
 
     def call_audio_cmd(self, *cmds):
+        self._alast = time.time()                            # the car answers these with its own play/pause too
         for c in cmds:
             self.box.send(T_AUDIO, struct.pack("<IfI", CALL_PLAY_DEC, 0.0, 1) + bytes([c]), droppable=False)
 
