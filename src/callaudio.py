@@ -11,6 +11,7 @@ UDP protocol, 127.0.0.1 only:   aa_bt -> bridge (port CALL_TO_BRIDGE):  b"S" cal
 Off unless AA_CALLS=1.
 """
 import array
+import math
 import os
 import socket
 import threading
@@ -21,6 +22,9 @@ CALL_TO_BRIDGE = int(os.environ.get("AA_CALL_PORT_OUT", "5290"))
 CALL_FROM_BRIDGE = int(os.environ.get("AA_CALL_PORT_IN", "5291"))
 SCO_BATCH = 320                  # bytes (20 ms at 8 kHz) per UDP datagram; SCO packets are small (typ. 48 bytes)
 MIC_CAP = 8000 * 2 // 2          # keep at most 0.5 s of car microphone audio
+MIC_GAIN = float(os.environ.get("AA_CALL_MIC_GAIN", "6"))     # the car mic arrives quiet; phone apps can mistake it for noise
+TONE_FILE = "/run/aa-call-tone"  # if this file exists when a call starts, send a 440 Hz test tone instead of the car mic
+TONE = array.array("h", [int(12000 * math.sin(2 * math.pi * 440 * i / 8000)) for i in range(8000)]).tobytes()   # 1 s, loops cleanly
 
 
 def peak(pcm):
@@ -30,6 +34,13 @@ def peak(pcm):
     return max(max(a), -min(a)) if a else 0
 
 
+def amplify(pcm, gain):
+    """Scale 16-bit PCM, clipping at full scale."""
+    a = array.array("h")
+    a.frombytes(pcm[:len(pcm) // 2 * 2])
+    return array.array("h", [max(-32768, min(32767, int(x * gain))) for x in a]).tobytes()
+
+
 class CallAudio:
     def __init__(self, log):
         self.log = log
@@ -37,6 +48,7 @@ class CallAudio:
         self.mic_lock = threading.Lock()
         self.out = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.active = False
+        self.fill = 0
         self.sco_listener = None
 
     # -------------------------------------------------------------- headset RFCOMM link (HSP)
@@ -94,6 +106,8 @@ class CallAudio:
         s.bind(("127.0.0.1", CALL_FROM_BRIDGE))
         while True:
             d, _ = s.recvfrom(4096)
+            if MIC_GAIN != 1:
+                d = amplify(d, MIC_GAIN)
             with self.mic_lock:
                 self.mic += d
                 if len(self.mic) > MIC_CAP:
@@ -105,6 +119,7 @@ class CallAudio:
                 d = bytes(self.mic[:n])
                 del self.mic[:n]
                 return d
+        self.fill += 1
         return b"\0" * n                                       # silence when the car mic has nothing yet
 
     def relay(self, conn):
@@ -114,7 +129,10 @@ class CallAudio:
             self.mic.clear()
         self.out.sendto(b"S", ("127.0.0.1", CALL_TO_BRIDGE))
         pending = bytearray()
-        n_in = n_out = peak_in = peak_out = 0
+        n_in = n_out = peak_in = peak_out = tone_pos = self.fill = 0
+        tone = os.path.exists(TONE_FILE)
+        if tone:
+            self.log("call audio: sending the 440 Hz test tone instead of the car mic")
         t0 = time.time()
         try:
             while True:
@@ -126,7 +144,11 @@ class CallAudio:
                 if len(pending) >= SCO_BATCH:
                     self.out.sendto(b"A" + bytes(pending), ("127.0.0.1", CALL_TO_BRIDGE))
                     pending.clear()
-                m = self._take_mic(len(d))                     # every packet in -> one packet of car microphone out
+                if tone:
+                    m = (TONE + TONE)[tone_pos:tone_pos + len(d)]
+                    tone_pos = (tone_pos + len(d)) % len(TONE)
+                else:
+                    m = self._take_mic(len(d))                 # every packet in -> one packet of car microphone out
                 conn.send(m)
                 n_out += 1
                 peak_in, peak_out = max(peak_in, peak(d)), max(peak_out, peak(m))
@@ -139,5 +161,5 @@ class CallAudio:
             except OSError:
                 pass
             self.out.sendto(b"E", ("127.0.0.1", CALL_TO_BRIDGE))
-            self.log("call audio: SCO closed after %.0f s (%d packets in, %d out; loudest sample: caller %d, car mic %d of 32767)"
-                     % (time.time() - t0, n_in, n_out, peak_in, peak_out))
+            self.log("call audio: SCO closed after %.0f s (%d packets in, %d out, %d of them empty filler; loudest sample: caller %d, sent to phone %d of 32767, gain %g)"
+                     % (time.time() - t0, n_in, n_out, self.fill, peak_in, peak_out, MIC_GAIN))

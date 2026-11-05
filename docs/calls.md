@@ -34,6 +34,12 @@ caller <-> phone ==Bluetooth SCO (8 kHz mono)==> Beagle (aa_bt.py + callaudio.py
 Normal phone calls and Facebook Messenger calls work through the car's speakers and microphone (SCO link, about 340 packets/s
 each way). Google Meet did not. The Android Auto call screen did not appear before the changes above; they are not yet confirmed.
 
+## Diagnosing a quiet call
+
+The log line at the end of each call gives the loudest sample each way, and how many packets had no car mic audio ready.
+`AA_CALL_MIC_GAIN` (default 6) amplifies the car mic. `sudo touch /run/aa-call-tone` makes the next call send a 440 Hz tone
+instead of the car mic, which shows whether the path to the phone works at all; `sudo rm /run/aa-call-tone` turns it off.
+
 ## Limits / what to check
 
 * SCO over a USB Bluetooth adapter needs the kernel's SCO-over-HCI path; if the log shows `SCO link from ...` but no audio, the
