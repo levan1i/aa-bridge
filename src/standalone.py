@@ -89,7 +89,7 @@ class Car(boxd.Box):
             return
         if mtype == T_AUDIO:                                     # car microphone: <IfI decodeType, volume, audioType=3> + PCM
             if len(pay) > 12 and struct.unpack("<I", pay[8:12])[0] == 3:
-                self.app.car_mic(pay[12:])
+                self.app.car_mic(pay[12:], struct.unpack("<I", pay[:4])[0])
             return
         log("<- type 0x%x len=%d %s" % (mtype, len(pay), pay[:24].hex()))
 
@@ -128,10 +128,12 @@ class App:
         if kind == b"S":
             self.call_active = True
             self.box.send(T_AUDIO, struct.pack("<IfI", 3, 0.0, 1) + bytes([4]), droppable=False)        # PHONECALL_START, 8 kHz mono
-            if not self.mic_on:                                                                           # car microphone on
-                self.box.send(T_AUDIO, struct.pack("<IfI", 5, 0.0, 1) + bytes([3]), droppable=False)
+            if not self.mic_on:     # car microphone on, in the SAME format as the playback: AutoKit feeds its echo canceller
+                                    # the played audio only when the two decode types match; otherwise the caller hears themselves
+                self.box.send(T_AUDIO, struct.pack("<IfI", 3, 0.0, 1) + bytes([3]), droppable=False)
                 self.box.send(T_CMD, struct.pack("<I", 1), droppable=False)
                 self.mic_on = self.call_mic = True
+                self.mic_chunks = 0
             log("call: audio link up -> car told call start + record")
         elif kind == b"A" and self.call_active:
             self.box.send(T_AUDIO, struct.pack("<IfI", 3, 0.0, 1) + body)
@@ -143,18 +145,24 @@ class App:
                 self.mic_on = self.call_mic = False
             log("call: audio link down -> car told call stop")
 
-    def call_mic_audio(self, pcm):
-        """Car microphone (16 kHz mono) -> 8 kHz for the phone's SCO link."""
+    def call_mic_audio(self, pcm, dec):
+        """Car microphone -> the phone's SCO link (8 kHz mono). Expected as 8 kHz; 16 kHz is halved in case the car ignores the request."""
+        if self.mic_chunks == 1:
+            log("call: car microphone decodeType %d" % dec)
+        if dec == 3:
+            self._call_sock.sendto(pcm, self.CALL_OUT)
+            return
         import array
         a = array.array("h")
         a.frombytes(pcm[:len(pcm) // 2 * 2])
         out = array.array("h", [(a[i] + a[i + 1]) // 2 for i in range(0, len(a) - 1, 2)])
         self._call_sock.sendto(out.tobytes(), self.CALL_OUT)
 
-    def car_mic(self, pcm):
+    def car_mic(self, pcm, dec=5):
         self.mic_chunks += 1
         if self.call_active:
-            self.call_mic_audio(pcm)
+            self.call_mic_audio(pcm, dec)
+            return
         s = self.session
         if s and s.alive and s.mic_open:
             self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(s.send_mic(pcm)))

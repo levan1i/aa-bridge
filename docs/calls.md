@@ -16,7 +16,7 @@ caller <-> phone ==Bluetooth SCO (8 kHz mono)==> Beagle (aa_bt.py + callaudio.py
   sends the caller's voice (8 kHz s16 mono) to the bridge, and writes the car's microphone back into SCO packet by packet.
 * `standalone.py`: on call start sends the car an audio message `(decodeType 3 = 8 kHz mono, audioType 1)` with command 4
   (PHONECALL_START), tells the car to record the microphone (INPUT_CONFIG + Command 1), streams the caller's voice as audio
-  messages, takes the car mic (16 kHz), halves it to 8 kHz and returns it. On the end it sends command 5 (PHONECALL_STOP) and
+  messages, and returns the car mic. The mic is requested at 8 kHz (decodeType 3), the same as the playback: AutoKit feeds its WebRTC echo canceller the played audio only when the two decode types match, so a mismatch makes callers hear themselves. On the end it sends command 5 (PHONECALL_STOP) and
   Command 2.
 * Enable with `AA_CALLS=1` in `/etc/beagle-aa-bridge/env`, then restart `aa-bt` and `standalone`.
 
