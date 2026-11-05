@@ -143,7 +143,8 @@ class App:
         if kind == b"S":
             self.call_active = True
             self._call_last = 0
-            self.box.send(T_AUDIO, struct.pack("<IfI", CALL_DEC, 0.0, 1) + bytes([4]), droppable=False)  # PHONECALL_START
+            for c in (4, 1):        # PHONECALL_START, then OUTPUT_START: AutoKit only sets up its call player on the second one
+                self.box.send(T_AUDIO, struct.pack("<IfI", CALL_DEC, 0.0, 1) + bytes([c]), droppable=False)
             if not self.mic_on:     # car microphone on, in the SAME format as the playback: AutoKit feeds its echo canceller
                                     # the played audio only when the two decode types match; otherwise the caller hears themselves
                 self.box.send(T_AUDIO, struct.pack("<IfI", CALL_DEC, 0.0, 1) + bytes([3]), droppable=False)
@@ -157,7 +158,8 @@ class App:
             self.box.send(T_AUDIO, struct.pack("<IfI", CALL_DEC, 0.0, 1) + body)
         elif kind == b"E" and self.call_active:
             self.call_active = False
-            self.box.send(T_AUDIO, struct.pack("<IfI", CALL_DEC, 0.0, 1) + bytes([5]), droppable=False)  # PHONECALL_STOP
+            for c in (2, 5):        # OUTPUT_STOP (stops the player and drops what is queued), then PHONECALL_STOP
+                self.box.send(T_AUDIO, struct.pack("<IfI", CALL_DEC, 0.0, 1) + bytes([c]), droppable=False)
             if self.call_mic:
                 self.box.send(T_CMD, struct.pack("<I", 2), droppable=False)
                 self.mic_on = self.call_mic = False
