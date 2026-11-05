@@ -10,6 +10,7 @@ UDP protocol, 127.0.0.1 only:   aa_bt -> bridge (port CALL_TO_BRIDGE):  b"S" cal
                                  bridge -> aa_bt (port CALL_FROM_BRIDGE): raw PCM 8 kHz s16 mono (car microphone)
 Off unless AA_CALLS=1.
 """
+import array
 import os
 import socket
 import threading
@@ -20,6 +21,13 @@ CALL_TO_BRIDGE = int(os.environ.get("AA_CALL_PORT_OUT", "5290"))
 CALL_FROM_BRIDGE = int(os.environ.get("AA_CALL_PORT_IN", "5291"))
 SCO_BATCH = 320                  # bytes (20 ms at 8 kHz) per UDP datagram; SCO packets are small (typ. 48 bytes)
 MIC_CAP = 8000 * 2 // 2          # keep at most 0.5 s of car microphone audio
+
+
+def peak(pcm):
+    """Loudest sample in a block of 16-bit PCM (0 = digital silence, 32767 = full scale)."""
+    a = array.array("h")
+    a.frombytes(pcm[:len(pcm) // 2 * 2])
+    return max(max(a), -min(a)) if a else 0
 
 
 class CallAudio:
@@ -106,7 +114,8 @@ class CallAudio:
             self.mic.clear()
         self.out.sendto(b"S", ("127.0.0.1", CALL_TO_BRIDGE))
         pending = bytearray()
-        n_in = n_out = 0
+        n_in = n_out = peak_in = peak_out = 0
+        t0 = time.time()
         try:
             while True:
                 d = conn.recv(1024)
@@ -117,8 +126,10 @@ class CallAudio:
                 if len(pending) >= SCO_BATCH:
                     self.out.sendto(b"A" + bytes(pending), ("127.0.0.1", CALL_TO_BRIDGE))
                     pending.clear()
-                conn.send(self._take_mic(len(d)))              # every packet in -> one packet of car microphone out
+                m = self._take_mic(len(d))                     # every packet in -> one packet of car microphone out
+                conn.send(m)
                 n_out += 1
+                peak_in, peak_out = max(peak_in, peak(d)), max(peak_out, peak(m))
         except OSError as e:
             self.log("call audio: SCO link ended: %r" % e)
         finally:
@@ -128,4 +139,5 @@ class CallAudio:
             except OSError:
                 pass
             self.out.sendto(b"E", ("127.0.0.1", CALL_TO_BRIDGE))
-            self.log("call audio: SCO closed (%d packets in, %d out)" % (n_in, n_out))
+            self.log("call audio: SCO closed after %.0f s (%d packets in, %d out; loudest sample: caller %d, car mic %d of 32767)"
+                     % (time.time() - t0, n_in, n_out, peak_in, peak_out))
