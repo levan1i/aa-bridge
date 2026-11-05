@@ -9,7 +9,7 @@
 * video: AA H.264 -> Carlinkit video messages; audio: AA PCM -> Carlinkit audio messages; touch: car -> AA input.
 Run as root on the Beagle. Phone: Android Auto 'Start head unit server' (until the Bluetooth start-up works again).
 """
-import argparse, asyncio, json, os, socket, struct, sys, threading, time
+import argparse, array, asyncio, json, os, socket, struct, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -39,6 +39,21 @@ def nal_types(data):
 NIGHT_MODE = os.environ.get("AA_NIGHT", "auto")          # auto: the car's own report if any, else by clock; day / night: fixed
 NIGHT_FROM = int(os.environ.get("AA_NIGHT_FROM", "18"))  # hour night starts (local time, see AA_TZ)
 NIGHT_TO = int(os.environ.get("AA_NIGHT_TO", "7"))       # hour night ends
+
+
+CALL_DEC = int(os.environ.get("AA_CALL_DEC", "5"))       # call audio format on the car link: 5 = 16 kHz mono, 3 = 8 kHz mono
+
+
+def double_rate(pcm, last):
+    """8 kHz -> 16 kHz mono s16 by linear interpolation; `last` carries the final sample between blocks."""
+    a = array.array("h")
+    a.frombytes(pcm[:len(pcm) // 2 * 2])
+    out = array.array("h")
+    for x in a:
+        out.append((last + x) // 2)
+        out.append(x)
+        last = x
+    return out.tobytes(), last
 
 
 def clock_night():
@@ -127,32 +142,34 @@ class App:
             return
         if kind == b"S":
             self.call_active = True
-            self.box.send(T_AUDIO, struct.pack("<IfI", 3, 0.0, 1) + bytes([4]), droppable=False)        # PHONECALL_START, 8 kHz mono
+            self._call_last = 0
+            self.box.send(T_AUDIO, struct.pack("<IfI", CALL_DEC, 0.0, 1) + bytes([4]), droppable=False)  # PHONECALL_START
             if not self.mic_on:     # car microphone on, in the SAME format as the playback: AutoKit feeds its echo canceller
                                     # the played audio only when the two decode types match; otherwise the caller hears themselves
-                self.box.send(T_AUDIO, struct.pack("<IfI", 3, 0.0, 1) + bytes([3]), droppable=False)
+                self.box.send(T_AUDIO, struct.pack("<IfI", CALL_DEC, 0.0, 1) + bytes([3]), droppable=False)
                 self.box.send(T_CMD, struct.pack("<I", 1), droppable=False)
                 self.mic_on = self.call_mic = True
                 self.mic_chunks = 0
             log("call: audio link up -> car told call start + record")
         elif kind == b"A" and self.call_active:
-            self.box.send(T_AUDIO, struct.pack("<IfI", 3, 0.0, 1) + body)
+            if CALL_DEC == 5:
+                body, self._call_last = double_rate(body, self._call_last)
+            self.box.send(T_AUDIO, struct.pack("<IfI", CALL_DEC, 0.0, 1) + body)
         elif kind == b"E" and self.call_active:
             self.call_active = False
-            self.box.send(T_AUDIO, struct.pack("<IfI", 3, 0.0, 1) + bytes([5]), droppable=False)        # PHONECALL_STOP
+            self.box.send(T_AUDIO, struct.pack("<IfI", CALL_DEC, 0.0, 1) + bytes([5]), droppable=False)  # PHONECALL_STOP
             if self.call_mic:
                 self.box.send(T_CMD, struct.pack("<I", 2), droppable=False)
                 self.mic_on = self.call_mic = False
             log("call: audio link down -> car told call stop")
 
     def call_mic_audio(self, pcm, dec):
-        """Car microphone -> the phone's SCO link (8 kHz mono). Expected as 8 kHz; 16 kHz is halved in case the car ignores the request."""
+        """Car microphone -> the phone's SCO link (8 kHz mono): 8 kHz passes through, 16 kHz is halved."""
         if self.mic_chunks == 1:
             log("call: car microphone decodeType %d" % dec)
         if dec == 3:
             self._call_sock.sendto(pcm, self.CALL_OUT)
             return
-        import array
         a = array.array("h")
         a.frombytes(pcm[:len(pcm) // 2 * 2])
         out = array.array("h", [(a[i] + a[i + 1]) // 2 for i in range(0, len(a) - 1, 2)])
