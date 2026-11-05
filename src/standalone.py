@@ -427,6 +427,7 @@ class App:
     # -------------------------------------------------- what is playing, phone -> car
     media_source = ""
     media_state = None
+    media_track = None
 
     def media_json(self, info, droppable):
         """MetaData message, subtype 1: plain JSON + NUL, the same as a real dongle sends in Android Auto mode."""
@@ -442,6 +443,10 @@ class App:
                 log("media: %s (%s)" % (m["state"], m["source"]))
             self.media_json({"MediaSongPlayTime": m["position"] * 1000, "MediaPlayStatus": 1 if m["state"] == "PLAYING" else 0}, True)
             return
+        track = (m["title"], m["artist"], m["album"], m["duration"], len(m["art"]))
+        if track == self.media_track:                        # the phone repeats this message many times per track
+            return
+        self.media_track = track
         self.media_json({"MediaAPPName": self.media_source, "MediaSongName": m["title"], "MediaArtistName": m["artist"],
                          "MediaAlbumName": m["album"], "MediaSongDuration": m["duration"] * 1000, "MediaSongPlayTime": 0}, False)
         art = m["art"]
@@ -495,6 +500,7 @@ class App:
     async def run_session(self, r, w, how):
         s = aas.AASession(r, w, on_video=self.on_video, on_audio=self.on_audio, mode=aas.compute_mode(*self.car_size), on_mic=self.on_mic, night=self.want_night(), on_phone_status=self.on_phone_status, on_media=self.on_media)
         self.session = s
+        self.media_track = None
         self.call_info = None                # a new session starts with {"CallStatus":0}, as on a real dongle
         log("phone session started (%s), video mode for car display %dx%d: res %d frame %dx%d ui %dx%d" % ((how,) + self.car_size + (s.mode["res"], s.mode["fw"], s.mode["fh"], s.mode["uw"], s.mode["uh"])))
         task = asyncio.ensure_future(s.run())
