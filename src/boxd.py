@@ -19,6 +19,7 @@ BASEKEY = b"SkBRDy3gmrw1ieH0"
 MAGIC_PLAIN, MAGIC_ENC = 0x55AA55AA, 0x55BB55BB
 T_OPEN, T_PLUGGED, T_PHASE, T_VIDEO, T_AUDIO, T_CMD = 1, 2, 3, 6, 7, 8
 T_BOXSET, T_FILE, T_HB, T_VER, T_CRYPT, T_APPINFO = 0x19, 0x99, 0xAA, 0xCC, 0xF0, 0xA0
+MAX_FRAME = 64 << 20             # the car's log (SendFile, after Command 161) passed 8 MB within minutes
 
 T0 = time.time()
 
@@ -192,8 +193,10 @@ class Box:
         self.buf += data
         while len(self.buf) >= 16:
             magic, length, mtype, chk = struct.unpack("<IIII", self.buf[:16])
-            if magic not in (MAGIC_PLAIN, MAGIC_ENC) or (mtype ^ chk) != 0xFFFFFFFF or length > 8 << 20:
-                log("!! bad header, resync", self.buf[:16].hex()); self.buf = self.buf[1:]; continue
+            if magic not in (MAGIC_PLAIN, MAGIC_ENC) or (mtype ^ chk) != 0xFFFFFFFF or length > MAX_FRAME:
+                found = [p for p in (self.buf.find(m, 1) for m in (b"\xaa\x55\xaa\x55", b"\xbb\x55\xbb\x55")) if p >= 0]
+                skip = min(found) if found else max(len(self.buf) - 3, 1)     # one step: the car's input waits behind this
+                log("!! bad header, skipped", skip, "bytes:", self.buf[:16].hex()); self.buf = self.buf[skip:]; continue
             if len(self.buf) < 16 + length:
                 return
             pay = self.buf[16:16 + length]; self.buf = self.buf[16 + length:]

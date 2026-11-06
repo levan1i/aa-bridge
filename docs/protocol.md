@@ -59,12 +59,12 @@ themselves, as the real box did. `AA_FOCUS=0` turns this off.
 
 The head unit offers the media info channel (descriptor field 9, no settings). The phone then sends MediaPlaybackStatus (0x8001:
 1 state, 2 PLAYING / 1 STOPPED / 3 PAUSED; 2 app name; 3 seconds) about once a second, and MediaPlaybackMetadata (0x8003: 1 title,
-2 artist, 3 album, 4 art, 6 duration in seconds) on a track change. These become box message 0x2A, never encrypted, `<I subtype>` +
+2 artist, 3 album, 4 art, 6 duration in seconds) on a track change. These become box message 0x2A, encrypted as a real box sends it, `<I subtype>` +
 content, and the fields follow the firmware's `mediaPlaybackUpdate` and `mediaMetadataUpdate` (`ARMAndroidAuto`). Subtype 1 is JSON + NUL.
 Each status gives `MediaSongPlayTime` (ms), plus `MediaAPPName` when the app changes. Each metadata message gives `MediaSongName`,
 `MediaArtistName`, `MediaAlbumName` and `MediaSongDuration` (ms), only those the phone sent. `MediaPlayStatus` is CarPlay only. Subtype 2
 is the cover, raw with no NUL, whatever its format, sent when its size changes. Playing is told by audio commands: MEDIA_START (10) or
 MEDIA_STOP (11) when the state changes, and a PLAYING status is dropped while no media audio runs. The stock AutoKit does not draw any of
 this: it passes it to apps bound to `IMusicInfoChangeListener` and `ICallInfoChangeListener`. `AA_MEDIA_INFO=0` stops offering the channel.
-A real box on a test car sent no 0x2A at all, through music, track changes and calls, and the reason is not known: the code is in the
-firmware, and the test car repeated the real car's startup. Video from that box was 1280x720, H.264 Baseline, for an Open of 1920x720.
+A real box in the car sent these encrypted, while the same box on `tools/fakecar.py` sent none; the reason is not known. Video on the
+test car was 1280x720, H.264 Baseline, for an Open of 1920x720.

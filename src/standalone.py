@@ -248,7 +248,7 @@ class App:
         if not call or call["name"] is not None:
             info["CallName"] = self.call_name
         if CALL_INFO:
-            self.box.send(0x2A, struct.pack("<I", 100) + json.dumps(info, ensure_ascii=False, separators=(",", ":")).encode() + b"\0", plain=True, droppable=False)
+            self.box.send(0x2A, struct.pack("<I", 100) + json.dumps(info, ensure_ascii=False, separators=(",", ":")).encode() + b"\0", droppable=False)
             if state != self.call_last:
                 log("call: details sent to the car (status %d)" % info["CallStatus"])
         self.call_last = state
@@ -559,7 +559,7 @@ class App:
     def media_json(self, info, droppable):
         """MetaData message, subtype 1: plain JSON + NUL."""
         self.box.send(0x2A, struct.pack("<I", 1) + json.dumps(info, ensure_ascii=False, separators=(",", ":")).encode() + b"\0",
-                      plain=True, droppable=droppable)
+                      droppable=droppable)
 
     test_files = 0
 
@@ -624,7 +624,7 @@ class App:
         art = m["art"]
         if art and len(art) != self.media_art and len(art) <= MEDIA_ART_MAX:
             self.media_art = len(art)
-            self.box.send(0x2A, struct.pack("<I", 2) + art, plain=True, droppable=True)    # always 2, whatever the format; no NUL
+            self.box.send(0x2A, struct.pack("<I", 2) + art, droppable=True)    # always 2, whatever the format; no NUL
         track = (m["title"], m["artist"], m["album"], m["duration"], len(art))
         if track != self.media_track:
             self.media_track = track

@@ -55,11 +55,11 @@ The phone's status drives the car, because it is the only signal before the audi
   `AA_CALL_ALERT=0` leaves out 12, 13 and the output start while ringing. `AA_FOCUS=0` leaves out the 503. The real box used decode type 3
   for every one of these; the mic config stays `AA_CALL_MIC_DEC`, see the table above. App calls (Meet, Messenger) report no status, so
   for them the audio link alone drives the call. An audio link that opens while the phone says ringing is treated as the ringing itself.
-* Caller details: message type 0x2A (never encrypted), `<I 100>` + JSON + NUL, following the firmware's `phoneStatusUpdate`
+* Caller details: message type 0x2A (encrypted, as a real box sends it), `<I 100>` + JSON + NUL, following the firmware's `phoneStatusUpdate`
   (`ARMAndroidAuto`), sent on every phone update during a call. `CallStatus` is 2 incoming, 4 in call or conference, 5 on hold,
   3 muted, 0 otherwise. `CallDirection` is 1 if the call rang, else 2. `CallNumber` and `CallID` (the same value) and `CallName` appear
   only if the phone gave them. When the calls end, one message has status 0 with the last number and name; the first update of a session
-  does the same with empty strings. The real box sent none of these on a test car, through three calls, so the car may ignore all of it;
+  does the same with empty strings. A real box in the car sent none on an outgoing call; incoming calls are not captured yet. The car may ignore all of it;
   `AA_CALL_INFO=0` turns it off. Numbers and names are not logged.
 * Car commands 300 (answer) and 301 (hang up) become Android keys 5 and 6. If the phone's state has not changed a second later,
   `AT+CKPD=200` presses the headset button. That button toggles, so it is never used to reject a ringing call.
