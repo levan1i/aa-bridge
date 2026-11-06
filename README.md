@@ -100,6 +100,7 @@ Logs: `/var/log/standalone.log`, `/var/log/aa_bt.log`.
 | `AA_CONNECTING` | `1` | show a still picture (`data/connecting-<W>x<H>.h264`, made by `tools/make_connecting.py`) while no phone is connected |
 | `AA_BT_RECONNECT` | `1` | while the car is on with no phone session, call the paired phones over Bluetooth so Android Auto starts again |
 | `AA_USB_GAP` | `10` | seconds the service stays off USB after a restart; with a shorter gap the car keeps an empty page in front of the video |
+| `AA_FOCUS`, `AA_CALL_ALERT` | `1`, `1` | send the car the phone's focus changes (Commands 502-507), and audio commands 12/13 around ringing |
 | `AA_TZ` | system time zone | time zone for the clock-based day/night, e.g. `Asia/Tbilisi` |
 
 ## Layout

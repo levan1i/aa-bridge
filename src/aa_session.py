@@ -192,7 +192,8 @@ def bt_address():
 
 
 class AASession:
-    def __init__(self, reader, writer, on_video=None, on_audio=None, name="phone", mode=None, on_mic=None, night=False, on_phone_status=None, on_media=None):
+    def __init__(self, reader, writer, on_video=None, on_audio=None, name="phone", mode=None, on_mic=None, night=False, on_phone_status=None, on_media=None, on_focus=None):
+        self.on_focus = on_focus                   # called with ("audio" or "navigation", request type)
         self.on_media = on_media                   # called with ("status", {...}) or ("metadata", {...}) from the phone
         self.on_phone_status = on_phone_status     # called with the phone's list of calls whenever it reports them
         self.on_mic = on_mic                       # called with True/False when the phone opens/closes the microphone
@@ -569,10 +570,14 @@ class AASession:
             rs.audio_focus_state = 4 if False else (1 if q.audio_focus_type in (1, 2, 3) else 3)   # GAIN / LOSS(release)
             await self.send_msg(CH_CONTROL, 0x13, rs)
             log("<- AUDIO_FOCUS_REQUEST type=%d -> state=%d" % (q.audio_focus_type, rs.audio_focus_state))
+            if self.on_focus:
+                self.on_focus("audio", q.audio_focus_type)
         elif mid == 0x0d:                                               # NAVIGATION_FOCUS_REQUEST
             rs = navresp.NavigationFocusResponse(); rs.type = 2
             await self.send_msg(CH_CONTROL, 0x0e, rs)
             log("<- NAVIGATION_FOCUS_REQUEST -> granted")
+            if self.on_focus:
+                self.on_focus("navigation", dict(pb_fields(body)).get(1))
         elif mid == 0x0f:                                               # SHUTDOWN_REQUEST
             await self.send_msg(CH_CONTROL, 0x10, shutresp.ShutdownResponse())
             log("<- SHUTDOWN_REQUEST: closing")

@@ -48,6 +48,12 @@ RFCOMM exchange: `WifiStartRequest(ip, port 5288)` → `WifiInfoRequest` → `Wi
 * Media keys (car to box, Command): 200 home, 201 play, 202 pause, 203 play/pause, 204 next, 205 previous, 300 answer, 301 hang up. After an audio stop the car app sends 201/202 itself (auto-resume); these are not button presses.
 * Day/night: the car sends `SendFile /tmp/night_mode` (4-byte value; 0 day, 1 night, 2 = let the box decide) and `{"DayNightMode":2}`; Command 16 = night, 17 = day when its theme changes. The box supplies the Android Auto NIGHT_DATA sensor event.
 
+## Focus (phone to car)
+
+Box to car, following `onAudioFocusChanned` and `onNaviFocusChanned` in `ARMAndroidAuto`. Phone audio focus request type 1, 2, 3, 4 gives Command
+502, 503, 504, 505 (request, transient, duck, release). Navigation focus type 2 gives 506, type 1 gives 507. Requests from before the car is told
+about the phone are sent right after the announcement. `AA_FOCUS=0` turns this off.
+
 ## What is playing (phone to car)
 
 The head unit offers the media info channel (descriptor field 9, no settings). The phone then sends MediaPlaybackStatus (0x8001:

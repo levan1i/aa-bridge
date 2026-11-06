@@ -46,6 +46,10 @@ NIGHT_TO = int(os.environ.get("AA_NIGHT_TO", "7"))       # hour night ends
 MEDIA_ART_MAX = 512 * 1024
 USB_GAP = float(os.environ.get("AA_USB_GAP", "10"))          # seconds off USB after a service restart; see leave_usb_gap
 RESTART_MARK = "/run/beagle-aa-bridge.started"               # /run is empty after a boot: a cold start needs no gap
+FOCUS = os.environ.get("AA_FOCUS", "1") == "1"               # tell the car about the phone's audio and navigation focus
+CALL_ALERT = os.environ.get("AA_CALL_ALERT", "1") == "1"     # audio commands 12/13 around the ringing
+AUDIO_FOCUS_CMD = {1: 502, 2: 503, 3: 504, 4: 505}           # the firmware's onAudioFocusChanned: request, transient, duck, release
+NAV_FOCUS_CMD = {2: 506, 1: 507}                             # onNaviFocusChanned: request, release
 CONNECTING = os.environ.get("AA_CONNECTING", "1") == "1"     # show a still picture while no phone is connected
 CALL_STATUS = {"IN_CALL": 4, "ON_HOLD": 5, "INCOMING": 2, "CONFERENCED": 4, "MUTED": 3}   # the firmware's table; anything else is 0
 CALL_INFO = os.environ.get("AA_CALL_INFO", "1") == "1"   # send the car the caller details message (type 42, subtype 100)
@@ -166,14 +170,24 @@ class App:
         for c in cmds:
             self.box.send(T_AUDIO, struct.pack("<IfI", CALL_PLAY_DEC, 0.0, 1) + bytes([c]), droppable=False)
 
+    def call_alert(self, c):
+        """ALERT_START (12) / ALERT_STOP (13), as CarPlay captures show around the ringing; the Android Auto firmware has no such path."""
+        if CALL_ALERT:
+            self._alast = time.time()
+            self.box.send(T_AUDIO, struct.pack("<IfI", 4, 0.0, 1) + bytes([c]), droppable=False)
+
     def call_tell_car(self, want):
         """Keep the car's idea of the call in step: 14 incoming, 4 call start, 5 call stop (each sent once)."""
         if want == self.call_car:
             return
+        if self.call_car == "ringing":
+            self.call_alert(13)
         if want is None:
             self.call_audio_cmd(5)
         else:
             self.call_audio_cmd(14 if want == "ringing" else 4)
+            if want == "ringing":
+                self.call_alert(12)
         log("call: car told %s" % (want or "no call"))
         self.call_car = want
 
@@ -378,6 +392,9 @@ class App:
         if self.session and self.session.mic_open:
             self.on_mic(True)
         self.cfg, self.car_ready, self.synced = b"", True, False
+        for cmd in self.focus_wait:
+            self.send_focus(cmd)
+        self.focus_wait = ()
         await self.restart_video()
 
     # -------------------------------------------------- microphone (phone asks -> car records -> PCM to the phone)
@@ -511,6 +528,23 @@ class App:
         self.box.send(0x2A, struct.pack("<I", 1) + json.dumps(info, ensure_ascii=False, separators=(",", ":")).encode() + b"\0",
                       plain=True, droppable=droppable)
 
+    focus_wait = ()                                      # focus commands from before the car was told about the phone
+
+    def send_focus(self, cmd):
+        self._alast = time.time()                            # the car may answer with its own play/pause
+        self.box.send(T_CMD, struct.pack("<I", cmd), droppable=False)
+        log("focus: Command %d sent to the car" % cmd)
+
+    def on_focus(self, kind, value):
+        """The phone asked for audio or navigation focus: Commands 502-507, as the firmware does."""
+        cmd = (AUDIO_FOCUS_CMD if kind == "audio" else NAV_FOCUS_CMD).get(value)
+        if not FOCUS or not cmd:
+            return
+        if self.box and self.car_ready:
+            self.send_focus(cmd)
+        else:
+            self.focus_wait = tuple(self.focus_wait) + (cmd,)
+
     def on_media(self, kind, m):
         """The firmware's mediaPlaybackUpdate and mediaMetadataUpdate. Neither has MediaPlayStatus: playing is told by media_signal."""
         if not self.box or not self.car_ready:
@@ -586,10 +620,11 @@ class App:
     # -------------------------------------------------- phone session loop
     async def run_session(self, r, w, how):
         notice_lost_phone(w)
-        s = aas.AASession(r, w, on_video=self.on_video, on_audio=self.on_audio, mode=aas.compute_mode(*self.car_size), on_mic=self.on_mic, night=self.want_night(), on_phone_status=self.on_phone_status, on_media=self.on_media)
+        s = aas.AASession(r, w, on_video=self.on_video, on_audio=self.on_audio, mode=aas.compute_mode(*self.car_size), on_mic=self.on_mic, night=self.want_night(), on_phone_status=self.on_phone_status, on_media=self.on_media, on_focus=self.on_focus)
         self.session = s
         self.media_track, self.media_state, self.media_source, self.media_art, self.media_on = None, None, "", 0, False
         self.call_last, self.call_incoming, self.call_number, self.call_name = None, False, "", ""
+        self.focus_wait = ()
         log("phone session started (%s), video mode for car display %dx%d: res %d frame %dx%d ui %dx%d" % ((how,) + self.car_size + (s.mode["res"], s.mode["fw"], s.mode["fh"], s.mode["uw"], s.mode["uh"])))
         task = asyncio.ensure_future(s.run())
         wd = asyncio.ensure_future(self.audio_watchdog())

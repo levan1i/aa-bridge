@@ -52,7 +52,7 @@ The phone's status drives the car, because it is the only signal before the audi
 * Car commands 300 (answer) and 301 (hang up) become Android keys 5 and 6. If the phone's state has not changed a second later,
   `AT+CKPD=200` presses the headset button. That button toggles, so it is never used to reject a ringing call.
 
-Real dongles also send audio commands 12/13 around the ringtone; these are not sent.
+Audio commands 12 and 13 (decode type 4, audio type 1) go around the ringing, as CarPlay captures show. `ARMAndroidAuto` has no path for them, so a real dongle may not send them in Android Auto mode. `AA_CALL_ALERT=0` turns them off.
 
 ## Tested so far
 
