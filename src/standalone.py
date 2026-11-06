@@ -46,6 +46,8 @@ NIGHT_TO = int(os.environ.get("AA_NIGHT_TO", "7"))       # hour night ends
 MEDIA_ART_MAX = 512 * 1024
 USB_GAP = float(os.environ.get("AA_USB_GAP", "10"))          # seconds off USB after a service restart; see leave_usb_gap
 RESTART_MARK = "/run/beagle-aa-bridge.started"               # /run is empty after a boot: a cold start needs no gap
+TEST = os.environ.get("AA_TEST", "0") == "1"                 # accept test frames from tools/carpoke.py and keep files the car sends
+TEST_PORT = int(os.environ.get("AA_TEST_PORT", "5293"))
 FOCUS = os.environ.get("AA_FOCUS", "1") == "1"               # tell the car about the phone's audio and navigation focus
 CALL_ALERT = os.environ.get("AA_CALL_ALERT", "1") == "1"     # audio commands 12/13 around the ringing
 AUDIO_FOCUS_CMD = {1: 502, 2: 503, 3: 504, 4: 505}           # the firmware's onAudioFocusChanned: request, transient, duck, release
@@ -105,6 +107,8 @@ class Car(boxd.Box):
             return
         if mtype in (T_FILE, T_BOXSET, T_APPINFO):
             log("<-", {T_FILE: "SendFile", T_BOXSET: "BoxSettings", T_APPINFO: "AppInfo"}[mtype], pay[:700].decode(errors="replace").replace("\n", " ").replace("\t", ""))
+            if mtype == T_FILE and TEST:
+                self.app.test_keep_file(pay)
             if mtype == T_FILE and b"/tmp/night_mode" in pay and len(pay) >= 4:
                 self.app.car_night_file(struct.unpack("<I", pay[-4:])[0])      # 0 day, 1 night, 2 = the box decides
             return
@@ -528,6 +532,22 @@ class App:
         self.box.send(0x2A, struct.pack("<I", 1) + json.dumps(info, ensure_ascii=False, separators=(",", ":")).encode() + b"\0",
                       plain=True, droppable=droppable)
 
+    test_files = 0
+
+    def test_frame(self, data):
+        """One frame from tools/carpoke.py: <I type><B plain> + payload."""
+        mtype, plain = struct.unpack("<IB", data[:5])
+        if self.box:
+            self.box.send(mtype, data[5:], plain=bool(plain), droppable=False)
+        log("test frame: type 0x%x, %d bytes: %s" % (mtype, len(data) - 5, data[5:80]))
+
+    def test_keep_file(self, pay):
+        self.test_files += 1
+        path = "/tmp/car-file-%d.bin" % self.test_files
+        with open(path, "wb") as f:
+            f.write(pay)
+        log("test: file from the car kept as %s (%d bytes)" % (path, len(pay)))
+
     focus_wait = ()                                      # focus commands from before the car was told about the phone
 
     def send_focus(self, cmd):
@@ -735,6 +755,13 @@ async def amain(a):
                 box.feed(data)
     threading.Thread(target=reader, daemon=True).start()
     log("standalone up: car side emulating 1314:1521; phone side connects to the phone's head unit server")
+    if TEST:
+        class _Test(asyncio.DatagramProtocol):
+            def datagram_received(self, data, addr):
+                if len(data) >= 5:
+                    app.test_frame(data)
+        await loop.create_datagram_endpoint(_Test, local_addr=("127.0.0.1", TEST_PORT))
+        log("test frames: listening on UDP %d" % TEST_PORT)
     await app.phone_loop()
 
 
