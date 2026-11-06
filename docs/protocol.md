@@ -52,7 +52,8 @@ RFCOMM exchange: `WifiStartRequest(ip, port 5288)` → `WifiInfoRequest` → `Wi
 
 Box to car, following `onAudioFocusChanned` and `onNaviFocusChanned` in `ARMAndroidAuto`. Phone audio focus request type 1, 2, 3, 4 gives Command
 502, 503, 504, 505 (request, transient, duck, release). Navigation focus type 2 gives 506, type 1 gives 507. Requests from before the car is told
-about the phone are sent right after the announcement. `AA_FOCUS=0` turns this off.
+about the phone are sent right after the announcement, and a repeat of the same Command within a second is dropped. Calls send 503
+themselves, as the real box did. `AA_FOCUS=0` turns this off.
 
 ## What is playing (phone to car)
 
@@ -65,3 +66,5 @@ Each status gives `MediaSongPlayTime` (ms), plus `MediaAPPName` when the app cha
 is the cover, raw with no NUL, whatever its format, sent when its size changes. Playing is told by audio commands: MEDIA_START (10) or
 MEDIA_STOP (11) when the state changes, and a PLAYING status is dropped while no media audio runs. The stock AutoKit does not draw any of
 this: it passes it to apps bound to `IMusicInfoChangeListener` and `ICallInfoChangeListener`. `AA_MEDIA_INFO=0` stops offering the channel.
+A real box on a test car sent no 0x2A at all, through music, track changes and calls, and the reason is not known: the code is in the
+firmware, and the test car repeated the real car's startup. Video from that box was 1280x720, H.264 Baseline, for an Open of 1920x720.

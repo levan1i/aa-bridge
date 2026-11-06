@@ -114,7 +114,7 @@ src/boxd.py         Carlinkit box emulation: FunctionFS gadget + encrypted AutoK
 data/connecting-*.h264  still picture shown while no phone is connected
 data/session_ref.json   startup replies of a real dongle (personal data replaced, see docs/protocol.md)
 config/ systemd/ scripts/   AP, DHCP, Bluetooth and service configuration, installer
-tools/              fakecar.py (stand-in for the car app), Android-x86 VM runner, udev rule
+tools/              fakecar.py (stand-in for the car), Android-x86 VM runner, udev rule
 docs/               protocol notes, Wi-Fi, resolution, testing, troubleshooting
 ```
 

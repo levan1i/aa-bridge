@@ -163,6 +163,7 @@ class App:
     call_active = False                  # the Bluetooth call audio link is up
     call_mic = False
     call_car = None                      # what the car was told: None, "ringing" (14) or "active" (4)
+    call_out = False                     # the car was told OUTPUT_START for the ringing or the call
     call_state = "idle"                  # from the phone's status: "idle", "ringing" or "active"
     call_last = None                     # state in the last caller details sent; the rest as in the firmware's phoneStatusUpdate
     call_incoming = False                # this call rang here
@@ -175,25 +176,57 @@ class App:
             self.box.send(T_AUDIO, struct.pack("<IfI", CALL_PLAY_DEC, 0.0, 1) + bytes([c]), droppable=False)
 
     def call_alert(self, c):
-        """ALERT_START (12) / ALERT_STOP (13), as CarPlay captures show around the ringing; the Android Auto firmware has no such path."""
+        """ALERT_START (12) / ALERT_STOP (13) around the ringing."""
         if CALL_ALERT:
-            self._alast = time.time()
-            self.box.send(T_AUDIO, struct.pack("<IfI", 4, 0.0, 1) + bytes([c]), droppable=False)
+            self.call_audio_cmd(c)
+
+    def call_output(self, on):
+        if on != self.call_out:
+            self.call_out = on
+            self.call_audio_cmd(1 if on else 2)
+
+    def call_audio_on(self):
+        """Microphone first, then OUTPUT_START, which is what sets up AutoKit's call player."""
+        if not self.mic_on:
+            self.box.send(T_AUDIO, struct.pack("<IfI", CALL_MIC_DEC, 0.0, 1) + bytes([3]), droppable=False)
+            self.box.send(T_CMD, struct.pack("<I", 1), droppable=False)
+            self.mic_on = self.call_mic = True
+            self.mic_chunks = 0
+        self.call_output(True)
+
+    def call_audio_off(self):
+        """OUTPUT_STOP and Command 2. The box sends the Command even if nobody answered, but it must not stop a voice session's recording."""
+        if self.call_out:
+            self.call_output(False)
+            if self.call_mic or not self.mic_on:
+                self.box.send(T_CMD, struct.pack("<I", 2), droppable=False)
+                self.mic_on = self.call_mic = False
 
     def call_tell_car(self, want):
-        """Keep the car's idea of the call in step: 14 incoming, 4 call start, 5 call stop (each sent once)."""
-        if want == self.call_car:
+        """Keep the car's idea of the call in step, in the order the real box sent in docs/calls.md (each change sent once)."""
+        was = self.call_car
+        if want == was:
             return
-        if self.call_car == "ringing":
+        self.call_car = want
+        if was == "ringing" and want == "active":
+            self.call_output(False)
             self.call_alert(13)
+        elif was == "ringing":
+            self.call_alert(13)
+            self.call_audio_off()
+        elif was == "active":
+            self.call_audio_off()
         if want is None:
             self.call_audio_cmd(5)
         else:
+            self.on_focus("audio", 2)
             self.call_audio_cmd(14 if want == "ringing" else 4)
-            if want == "ringing":
+            if want == "active":
+                self.call_audio_on()
+            elif CALL_ALERT:
                 self.call_alert(12)
+                self.call_output(True)
         log("call: car told %s" % (want or "no call"))
-        self.call_car = want
 
     def call_send_info(self, call):
         """MetaData subtype 100, the firmware's phoneStatusUpdate: every phone update while a call exists, one message when it goes.
@@ -228,7 +261,7 @@ class App:
         ring = [c for c in live if c["state"] == "INCOMING"]
         if ring:
             self.call_state = "ringing"
-            self.call_tell_car("active" if self.call_active else "ringing")
+            self.call_tell_car("active" if self.call_car == "active" else "ringing")     # a second call waits: this one stays active
             self.call_send_info(ring[0])
         elif live:
             self.call_state = "active"
@@ -271,27 +304,23 @@ class App:
         if kind == b"S":
             self.call_active = True
             self._call_last = 0
-            self.call_tell_car("active")
-            self.call_audio_cmd(1)  # OUTPUT_START: AutoKit only sets up its call player on this
-            if not self.mic_on:     # car microphone on
-                self.box.send(T_AUDIO, struct.pack("<IfI", CALL_MIC_DEC, 0.0, 1) + bytes([3]), droppable=False)
-                self.box.send(T_CMD, struct.pack("<I", 1), droppable=False)
-                self.mic_on = self.call_mic = True
-                self.mic_chunks = 0
-            log("call: audio link up -> car told call start + record")
-        elif kind == b"A" and self.call_active:
+            if self.call_state == "ringing":                 # the ringing itself can come over this link
+                self.call_tell_car("ringing")
+            else:
+                self.call_tell_car("active")
+                self.call_audio_on()
+            log("call: audio link up")
+        elif kind == b"A" and self.call_active and self.call_out:
             if CALL_PLAY_DEC == 5:
                 body, self._call_last = double_rate(body, self._call_last)
             self.box.send(T_AUDIO, struct.pack("<IfI", CALL_PLAY_DEC, 0.0, 1) + body)
         elif kind == b"E" and self.call_active:
             self.call_active = False
-            self.call_audio_cmd(2)  # OUTPUT_STOP: stops the player and drops what is queued
-            if self.call_mic:
-                self.box.send(T_CMD, struct.pack("<I", 2), droppable=False)
-                self.mic_on = self.call_mic = False
             if self.call_state == "idle":
                 self.call_tell_car(None)
-            log("call: audio link down -> car told call stop")
+            elif self.call_car == "active":                  # moved to the phone itself: the call goes on without the car
+                self.call_audio_off()
+            log("call: audio link down")
 
     def call_mic_audio(self, pcm, dec):
         """Car microphone -> the phone's SCO link (8 kHz mono): 8 kHz passes through, 16 kHz is halved."""
@@ -412,7 +441,7 @@ class App:
             self.box.send(T_CMD, struct.pack("<I", 1), droppable=False)
             self.mic_on, self.mic_chunks = True, 0
             log("microphone: phone opened it -> car told to record (INPUT_CONFIG 16 kHz mono + cmd 1)")
-        elif not opened and self.mic_on and not self.call_active:
+        elif not opened and self.mic_on and not self.call_active and not self.call_mic:
             self.box.send(T_CMD, struct.pack("<I", 2), droppable=False)
             self.mic_on = False
             log("microphone: phone closed it -> car told to stop (cmd 2); %d chunks received" % self.mic_chunks)
@@ -549,9 +578,14 @@ class App:
         log("test: file from the car kept as %s (%d bytes)" % (path, len(pay)))
 
     focus_wait = ()                                      # focus commands from before the car was told about the phone
+    focus_last = (None, 0.0)
 
     def send_focus(self, cmd):
-        self._alast = time.time()                            # the car may answer with its own play/pause
+        now = time.time()
+        if cmd == self.focus_last[0] and now - self.focus_last[1] < 1:     # a call's 503 and the phone's own request for it
+            return
+        self.focus_last = (cmd, now)
+        self._alast = now                                    # the car may answer with its own play/pause
         self.box.send(T_CMD, struct.pack("<I", cmd), droppable=False)
         log("focus: Command %d sent to the car" % cmd)
 
