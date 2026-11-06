@@ -11,6 +11,7 @@ Run as root. Needs bluetoothd started with:  --compat -P '*'   (see config/bluet
 import asyncio, glob, os, socket, struct, sys, threading, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import phoneid
 from dbus_next import Variant
 from dbus_next.aio import MessageBus
 from dbus_next.constants import BusType
@@ -154,6 +155,7 @@ class Profile(ServiceInterface):
         sock = socket.socket(fileno=fd)
         if self.kind == "aa":
             LAST_AA = time.time()
+            asyncio.ensure_future(note_phone(device))
             threading.Thread(target=handshake, args=(sock, self.pname), daemon=True).start()
         else:
             sock.setblocking(True)
@@ -216,6 +218,18 @@ async def bluez_iface(bus, path, name):
     return bus.get_proxy_object("org.bluez", path, await bus.introspect("org.bluez", path)).get_interface(name)
 
 
+async def note_phone(path):
+    """Remember the phone that started Android Auto: the bridge tells the car about it."""
+    try:
+        props = await bluez_iface(BUS, path, "org.freedesktop.DBus.Properties")
+        mac = (await props.call_get("org.bluez.Device1", "Address")).value
+        name = (await props.call_get("org.bluez.Device1", "Alias")).value
+        phoneid.save(mac, name)
+        log("phone for the car: %s %s" % (mac, name))
+    except Exception as e:
+        log("phone details not saved:", repr(e))
+
+
 async def reach_phone(bus):
     """Android Auto starts its wireless setup when the phone gets a Bluetooth headset link to a known car. After a restart the
     phone does not open one by itself, so open it from here. A link left over from the old session has to drop first."""
@@ -262,7 +276,8 @@ async def reconnect_loop(bus):
 
 
 async def main():
-    bus = await MessageBus(bus_type=BusType.SYSTEM, negotiate_unix_fd=True).connect()
+    global BUS
+    bus = BUS = await MessageBus(bus_type=BusType.SYSTEM, negotiate_unix_fd=True).connect()
     for path, uuid, name, kind, opts in (
         ("/aa/hfp", HFP_AG, "Hands-Free Audio Gateway", "hfp", {}),
         ("/aa/hsp", HSP_HS, "Headset", "hsp", {}),

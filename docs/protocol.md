@@ -18,8 +18,9 @@
 * The IM L6 app shows only the **top 720 rows** of the frame. It crashed on 1280x720 streams and on streams whose SPS
   has cropping, and accepts the uncropped 1920x1080 frame the phone produces.
 * `data/session_ref.json` is a decoded capture of the real dongle's startup replies. The phone's Bluetooth address and
-  name, the dongle UUID and the model strings were replaced with same-length placeholders, because the file is replayed
-  to the car (`announce_phone`).
+  name, the dongle UUID and the model strings were replaced with same-length placeholders. The file is replayed to the car,
+  so `phoneid.py` fills in the real phone as the frames are sent: `aa_bt.py` saves its Bluetooth address and name in
+  `/var/lib/beagle-aa-bridge/phone.json`, and the model comes from the phone's SERVICE_DISCOVERY_REQUEST (field 5).
 
 ## Android Auto head-unit protocol (phone side, `aa_session.py`)
 

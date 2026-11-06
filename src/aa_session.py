@@ -139,6 +139,14 @@ def pb_text(fields, n):
     return bytes(fields[n]).decode(errors="replace") if n in fields else None
 
 
+def discovery_model(body):
+    """The phone's maker and model from its SERVICE_DISCOVERY_REQUEST: field 5, what the firmware logs as "brand" and sends as MDModel."""
+    for f, v in pb_fields(body):
+        if f == 5 and isinstance(v, bytes):
+            return v.decode(errors="replace").strip()
+    return ""
+
+
 def phone_calls(body):
     """PhoneStatusUpdate -> [{state, seconds, number, name}]; a number or name the phone did not send is None."""
     calls = []
@@ -194,6 +202,7 @@ def bt_address():
 class AASession:
     def __init__(self, reader, writer, on_video=None, on_audio=None, name="phone", mode=None, on_mic=None, night=False, on_phone_status=None, on_media=None, on_focus=None):
         self.on_focus = on_focus                   # called with ("audio" or "navigation", request type)
+        self.phone_model = ""                      # from the phone's discovery request
         self.on_media = on_media                   # called with ("status", {...}) or ("metadata", {...}) from the phone
         self.on_phone_status = on_phone_status     # called with the phone's list of calls whenever it reports them
         self.on_mic = on_mic                       # called with True/False when the phone opens/closes the microphone
@@ -556,6 +565,7 @@ class AASession:
     async def on_control(self, mid, body):
         if mid == 5:                                                    # SERVICE_DISCOVERY_REQUEST
             log("<- SERVICE_DISCOVERY_REQUEST (%d bytes)" % len(body))
+            self.phone_model = discovery_model(body)
             await self.send_msg(CH_CONTROL, 6, self.build_discovery())
             log("-> SERVICE_DISCOVERY_RESPONSE (video res=%d/30 frame=%dx%d ui=%dx%d insets=%s dpi=%d, 3 audio, mic, input, sensors)" % (self.mode["res"], self.mode["fw"], self.mode["fh"], self.mode["uw"], self.mode["uh"], self.mode["insets"] or "-", self.mode["dpi"]))
         elif mid == 0x0b:                                               # PING_REQUEST

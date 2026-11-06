@@ -15,6 +15,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import boxd
+import phoneid
 import aa_session as aas
 from boxd import log, T_OPEN, T_VIDEO, T_AUDIO, T_CMD, T_BOXSET, T_FILE, T_HB, T_APPINFO, T_CRYPT
 
@@ -100,9 +101,10 @@ class Car(boxd.Box):
                 log("<- Open %dx%d@%d fmt=%d" % vals[:4])
                 self.last_open = pay
                 self.app.car_size = (vals[0], vals[1])
+            phone = phoneid.load()
             for m in self.ref:                                   # instant startup replies copied from the real dongle
                 if m["dir"] == "box" and m["t"] < 0.3 and m["type"] != T_CRYPT:
-                    self.send(m["type"], pay if m["type"] == T_OPEN else bytes.fromhex(m["hex"]), plain=not m["enc"])
+                    self.send(m["type"], pay if m["type"] == T_OPEN else phoneid.fill(m["type"], bytes.fromhex(m["hex"]), phone), plain=not m["enc"])
             self.app.car_opened()
             return
         if mtype in (T_FILE, T_BOXSET, T_APPINFO):
@@ -376,11 +378,12 @@ class App:
 
     async def send_announcement(self, sid):
         """The sequence the real dongle sends when a phone connects. False if the car re-opened meanwhile."""
+        phone, model = phoneid.load(), self.session.phone_model if self.session else ""
         for m in self.ref:
             if m["dir"] == "box" and 2.3 < m["t"] < 3.8:
                 if sid != self.sid:
                     return False
-                self.box.send(m["type"], bytes.fromhex(m["hex"]), plain=not m["enc"])
+                self.box.send(m["type"], phoneid.fill(m["type"], bytes.fromhex(m["hex"]), phone, model), plain=not m["enc"])
                 await asyncio.sleep(0.03)
         return True
 

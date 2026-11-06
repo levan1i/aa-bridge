@@ -83,6 +83,9 @@ The phone shows the Android Auto prompt over Bluetooth and joins the Beagle's Wi
 Services: `aa-hostapd`, `aa-dnsmasq` (the AP), `aa-bt-agent` + `aa-bt` (Bluetooth hand-off), `standalone` (the bridge).
 Logs: `/var/log/standalone.log`, `/var/log/aa_bt.log`.
 
+To put new code on a Beagle that is already set up, run `sudo scripts/install.sh --update` from a checkout. It copies `src/`,
+`data/`, `scripts/` and `tools/` to `/opt/beagle-aa-bridge`, keeps the configuration and restarts `aa-bt` and `standalone`.
+
 ## Configuration
 
 `/etc/beagle-aa-bridge/env` (read by the services):
@@ -101,6 +104,7 @@ Logs: `/var/log/standalone.log`, `/var/log/aa_bt.log`.
 | `AA_BT_RECONNECT` | `1` | while the car is on with no phone session, call the paired phones over Bluetooth so Android Auto starts again |
 | `AA_USB_GAP` | `10` | seconds the service stays off USB after a restart; with a shorter gap the car keeps an empty page in front of the video |
 | `AA_FOCUS`, `AA_CALL_ALERT` | `1`, `1` | send the car the phone's focus changes (Commands 502-507), and audio commands 12/13 around ringing |
+| `AA_PHONE_ID` | `1` | tell the car the real Bluetooth address, name and model of the connected phone, as a real dongle does; `0` sends the placeholders from `data/session_ref.json` |
 | `AA_TEST` | `0` | accept single test frames from `tools/carpoke.py` (local UDP 5293) and keep files the car sends in `/tmp/car-file-*.bin` |
 | `AA_TZ` | system time zone | time zone for the clock-based day/night, e.g. `Asia/Tbilisi` |
 
@@ -108,6 +112,7 @@ Logs: `/var/log/standalone.log`, `/var/log/aa_bt.log`.
 
 ```
 src/standalone.py   the bridge: car emulator + glue (video/audio/touch), phone session lifecycle
+src/phoneid.py      the real phone's address, name and model, filled into the frames replayed to the car
 src/aa_session.py   Android Auto head-unit protocol over one TCP connection (framing, TLS, channels, video mode)
 src/aa_bt.py        Bluetooth hand-off for wireless AA (BlueZ profiles, RFCOMM WifiStart/WifiInfo)
 src/boxd.py         Carlinkit box emulation: FunctionFS gadget + encrypted AutoKit protocol
@@ -125,7 +130,6 @@ docs/               protocol notes, Wi-Fi, resolution, testing, troubleshooting
 * Phone calls: the call voice goes over Bluetooth hands-free, not the Android Auto link, so it needs `AA_CALLS=1` (see [docs/calls.md](docs/calls.md)). Phone and Messenger calls work that way; Google Meet does not yet, and Android Auto shows no call screen.
 * Day/night: the car only says "auto" (`night_mode` = 2), so the bridge decides by clock (`AA_NIGHT*`), not from real light or headlight state. An explicit report from the car (Command 16/17) is honoured if one ever arrives.
 * Audio stop commands (navigation/voice 7, media 11, output 2) are sent when a stream goes silent so the car returns to the music volume; the timings are tuned by hand.
-* The phone name / Bluetooth address replayed to the car come from a sanitized capture, not from the real phone.
 * Touch mapping assumes the car app stretches the UI area over its whole view.
 * Uses a published sample TLS certificate from aasdk to talk to the phone.
 * Random reboots were seen on one board (suspected power supply). Not diagnosed.
