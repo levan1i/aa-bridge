@@ -134,28 +134,31 @@ def _rd_varint(b, i):
             return v, i
 
 
+def pb_text(fields, n):
+    """String field n, or None if the message does not have it."""
+    return bytes(fields[n]).decode(errors="replace") if n in fields else None
+
+
 def phone_calls(body):
-    """PhoneStatusUpdate -> [{state, seconds, number, name}]."""
+    """PhoneStatusUpdate -> [{state, seconds, number, name}]; a number or name the phone did not send is None."""
     calls = []
     for f, v in pb_fields(body):
         if f == 1:
             c = dict(pb_fields(v))
-            calls.append({"state": CALL_STATES.get(c.get(1), "UNKNOWN"), "seconds": c.get(2, 0),
-                          "number": bytes(c.get(3, b"")).decode(errors="replace"), "name": bytes(c.get(4, b"")).decode(errors="replace")})
+            calls.append({"state": CALL_STATES.get(c.get(1), "UNKNOWN"), "seconds": c.get(2, 0), "number": pb_text(c, 3), "name": pb_text(c, 4)})
     return calls
 
 
 def media_status(body):
     """MediaPlaybackStatus (0x8001) -> {state, source, position}."""
     f = dict(pb_fields(body))
-    return {"state": PLAYBACK_STATES.get(f.get(1), "UNKNOWN"), "source": bytes(f.get(2, b"")).decode(errors="replace"), "position": f.get(3, 0)}
+    return {"state": PLAYBACK_STATES.get(f.get(1), "UNKNOWN"), "source": pb_text(f, 2), "position": f.get(3)}
 
 
 def media_metadata(body):
     """MediaPlaybackMetadata (0x8003) -> {title, artist, album, art, duration}."""
     f = dict(pb_fields(body))
-    t = lambda n: bytes(f.get(n, b"")).decode(errors="replace")
-    return {"title": t(1), "artist": t(2), "album": t(3), "art": bytes(f.get(4, b"")), "duration": f.get(6, 0)}
+    return {"title": pb_text(f, 1), "artist": pb_text(f, 2), "album": pb_text(f, 3), "art": bytes(f.get(4, b"")), "duration": f.get(6)}
 
 
 def phone_status_text(calls):

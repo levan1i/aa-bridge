@@ -8,7 +8,7 @@ Follows the working recipe from mrmees/open-android-auto docs/wireless-bluetooth
   * then the phone joins our Wi-Fi AP and connects to TCP <ip>:<port>; this milestone just accepts it and logs.
 Run as root. Needs bluetoothd started with:  --compat -P '*'   (see config/bluetooth-override.conf)
 """
-import asyncio, os, socket, struct, sys, threading, time
+import asyncio, glob, os, socket, struct, sys, threading, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dbus_next import Variant
@@ -19,6 +19,8 @@ from dbus_next.service import ServiceInterface, method
 AA_UUID = "4de17a00-52cb-11e6-bdf4-0800200c9a66"
 HFP_AG = "0000111f-0000-1000-8000-00805f9b34fb"
 HSP_HS = "00001108-0000-1000-8000-00805f9b34fb"
+HSP_AG = "00001112-0000-1000-8000-00805f9b34fb"          # the phone's side of the headset link: what we connect to
+RECONNECT = os.environ.get("AA_BT_RECONNECT", "1") == "1"
 
 IP = os.environ.get("AA_IP", "10.0.0.1")
 PORT = int(os.environ.get("AA_PORT", "5288"))
@@ -124,6 +126,7 @@ def handshake(sock, who):
 
 
 HELD = []     # sockets we must keep open (HFP/HSP)
+LAST_AA = 0.0  # when the phone last opened the Android Auto Bluetooth link
 CALLS = None  # call audio relay (SCO <-> bridge), only when AA_CALLS=1
 
 
@@ -146,9 +149,11 @@ class Profile(ServiceInterface):
 
     @method()
     def NewConnection(self, device: "o", fd: "h", fd_properties: "a{sv}"):
+        global LAST_AA
         log("NewConnection", self.pname, device)
         sock = socket.socket(fileno=fd)
         if self.kind == "aa":
+            LAST_AA = time.time()
             threading.Thread(target=handshake, args=(sock, self.pname), daemon=True).start()
         else:
             sock.setblocking(True)
@@ -187,6 +192,75 @@ async def tcp_server():
     return srv
 
 
+def phone_session_up():
+    """The phone's Android Auto TCP connection to the bridge is established."""
+    try:
+        with open("/proc/net/tcp") as f:
+            return any(l.split()[1].endswith(":%04X" % PORT) and l.split()[3] == "01" for l in f.readlines()[1:])
+    except OSError:
+        return True
+
+
+def car_attached():
+    """The car's USB host has configured our gadget: the car is on and wants a phone."""
+    for p in glob.glob("/sys/class/udc/*/state"):
+        try:
+            if open(p).read().strip() == "configured":
+                return True
+        except OSError:
+            pass
+    return False
+
+
+async def bluez_iface(bus, path, name):
+    return bus.get_proxy_object("org.bluez", path, await bus.introspect("org.bluez", path)).get_interface(name)
+
+
+async def reach_phone(bus):
+    """Android Auto starts its wireless setup when the phone gets a Bluetooth headset link to a known car. After a restart the
+    phone does not open one by itself, so open it from here. A link left over from the old session has to drop first."""
+    om = await bluez_iface(bus, "/", "org.freedesktop.DBus.ObjectManager")
+    devices = []
+    for path, ifaces in (await om.call_get_managed_objects()).items():
+        d = ifaces.get("org.bluez.Device1")
+        if d and d["Paired"].value:
+            devices.append((not d["Connected"].value, path, d["Connected"].value))
+    for _, path, connected in sorted(devices):                # the phone that is already linked goes first
+        dev = await bluez_iface(bus, path, "org.bluez.Device1")
+        try:
+            if connected:
+                log("no Android Auto session: dropping the old Bluetooth link", path)
+                await dev.call_disconnect()
+                await asyncio.sleep(2)
+            log("no Android Auto session: calling the phone", path)
+            await dev.call_connect_profile(HSP_AG)
+            return True
+        except Exception as e:
+            log("could not reach", path, repr(e))
+    return False
+
+
+async def reconnect_loop(bus):
+    """While the car is on with no phone session, keep asking the paired phones to connect, less often as time goes on."""
+    idle = wake = 0.0
+    wait = 20
+    while True:
+        await asyncio.sleep(3)
+        now = time.time()
+        busy = CALLS is not None and CALLS.active
+        if phone_session_up() or busy or not car_attached():
+            idle, wake, wait = 0.0, 0.0, 20
+            continue
+        idle = idle or now
+        if now - idle < 10 or now - LAST_AA < 30 or now < wake:
+            continue
+        try:
+            await reach_phone(bus)
+        except Exception as e:
+            log("reconnect failed:", repr(e))
+        wake, wait = now + wait, min(wait * 2, 120)
+
+
 async def main():
     bus = await MessageBus(bus_type=BusType.SYSTEM, negotiate_unix_fd=True).connect()
     for path, uuid, name, kind, opts in (
@@ -197,8 +271,11 @@ async def main():
         bus.export(path, Profile(name, kind))
         introspect = await bus.introspect("org.bluez", "/org/bluez")
         pm = bus.get_proxy_object("org.bluez", "/org/bluez", introspect).get_interface("org.bluez.ProfileManager1")
-        options = {"Name": Variant("s", name), "Role": Variant("s", "server"),
-                   "RequireAuthentication": Variant("b", False), "RequireAuthorization": Variant("b", False)}
+        options = {"Name": Variant("s", name), "RequireAuthentication": Variant("b", False), "RequireAuthorization": Variant("b", False)}
+        if kind == "hsp":
+            options["AutoConnect"] = Variant("b", False)      # no Role: we can also open this link ourselves (reach_phone)
+        else:
+            options["Role"] = Variant("s", "server")
         options.update(opts)
         await pm.call_register_profile(path, uuid, options)
         log("registered profile", name, uuid)
@@ -221,6 +298,8 @@ async def main():
     if not os.environ.get("AA_NO_TCP"):
         await tcp_server()
     log("ready: pair the phone with '%s' and wait for the Android Auto prompt" % ALIAS)
+    if RECONNECT:
+        asyncio.ensure_future(reconnect_loop(bus))
     await asyncio.get_event_loop().create_future()
 
 

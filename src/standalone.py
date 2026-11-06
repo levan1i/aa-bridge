@@ -9,7 +9,7 @@
 * video: AA H.264 -> Carlinkit video messages; audio: AA PCM -> Carlinkit audio messages; touch: car -> AA input.
 Run as root on the Beagle. Phone: Android Auto 'Start head unit server' (until the Bluetooth start-up works again).
 """
-import argparse, array, asyncio, json, os, socket, struct, sys, threading, time, uuid
+import argparse, array, asyncio, json, os, socket, struct, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -44,6 +44,10 @@ NIGHT_TO = int(os.environ.get("AA_NIGHT_TO", "7"))       # hour night ends
 # Call formats on the car link (3 = 8 kHz mono, 5 = 16 kHz mono), as observed on the test car: 16 kHz playback came out stretched and
 # late, an 8 kHz mic sounded robotic to the other side. They differ, so AutoKit's echo canceller is off; callaudio.py ducks the mic instead.
 MEDIA_ART_MAX = 512 * 1024
+USB_GAP = float(os.environ.get("AA_USB_GAP", "10"))          # seconds off USB after a service restart; see leave_usb_gap
+RESTART_MARK = "/run/beagle-aa-bridge.started"               # /run is empty after a boot: a cold start needs no gap
+CONNECTING = os.environ.get("AA_CONNECTING", "1") == "1"     # show a still picture while no phone is connected
+CALL_STATUS = {"IN_CALL": 4, "ON_HOLD": 5, "INCOMING": 2, "CONFERENCED": 4, "MUTED": 3}   # the firmware's table; anything else is 0
 CALL_INFO = os.environ.get("AA_CALL_INFO", "1") == "1"   # send the car the caller details message (type 42, subtype 100)
 CALL_CTL = ("127.0.0.1", int(os.environ.get("AA_CALL_PORT_CTL", "5292")))    # commands for the Bluetooth headset link (aa_bt)
 CALL_PLAY_DEC = int(os.environ.get("AA_CALL_PLAY_DEC", "3"))
@@ -115,6 +119,17 @@ class Car(boxd.Box):
         log("<- type 0x%x len=%d %s" % (mtype, len(pay), pay[:24].hex()))
 
 
+def notice_lost_phone(w):
+    """Without this a phone that left (Wi-Fi off, out of range) keeps its session alive for many minutes: the car stays on the last
+    frame and nothing reconnects. Keepalive probes make silence show, and the user timeout closes the connection after 8 s of it."""
+    s = w.get_extra_info("socket")
+    if s is None:
+        return
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    for opt, value in ((socket.TCP_KEEPIDLE, 3), (socket.TCP_KEEPINTVL, 2), (socket.TCP_KEEPCNT, 2), (socket.TCP_USER_TIMEOUT, 8000)):
+        s.setsockopt(socket.IPPROTO_TCP, opt, value)
+
+
 class App:
     def __init__(self, loop, phone_ip, ref):
         self.loop, self.phone_ip, self.ref = loop, phone_ip, ref
@@ -141,9 +156,10 @@ class App:
     call_mic = False
     call_car = None                      # what the car was told: None, "ringing" (14) or "active" (4)
     call_state = "idle"                  # from the phone's status: "idle", "ringing" or "active"
-    call_dir = 2                         # 1 incoming, 2 outgoing
-    call_info = None                     # last caller details sent to the car
-    call_id = None
+    call_last = None                     # state in the last caller details sent; the rest as in the firmware's phoneStatusUpdate
+    call_incoming = False                # this call rang here
+    call_number = ""
+    call_name = ""
 
     def call_audio_cmd(self, *cmds):
         self._alast = time.time()                            # the car answers these with its own play/pause too
@@ -161,19 +177,30 @@ class App:
         log("call: car told %s" % (want or "no call"))
         self.call_car = want
 
-    def call_send_info(self, status, name="", number=""):
-        """MetaData message, subtype 100, as a real dongle sends it: plain (0x2A is never encrypted), {"CallStatus":0} when idle."""
-        info = {"CallStatus": status}
-        if status:
-            if not self.call_id:
-                self.call_id = str(uuid.uuid4()).upper()     # one per call
-            info.update(CallDirection=self.call_dir, CallID=self.call_id, CallName=name or number, CallNumber=number)
-        else:
-            self.call_id = None
-        if CALL_INFO and info != self.call_info:
+    def call_send_info(self, call):
+        """MetaData subtype 100, the firmware's phoneStatusUpdate: every phone update while a call exists, one message when it goes.
+        CallID is the number, and the number and name are only there if the phone gave them. No call: the last ones, status 0."""
+        state = call["state"] if call else "INACTIVE"
+        if not call and self.call_last == "INACTIVE":
+            return
+        if state == "INCOMING":
+            self.call_incoming = True
+        info = {"CallStatus": CALL_STATUS.get(state, 0), "CallDirection": 1 if self.call_incoming else 2}
+        if state == "INACTIVE":
+            self.call_incoming = False
+        if call and call["number"] is not None:
+            self.call_number = call["number"]
+        if call and call["name"] is not None:
+            self.call_name = call["name"]
+        if not call or call["number"] is not None:
+            info.update(CallNumber=self.call_number, CallID=self.call_number)
+        if not call or call["name"] is not None:
+            info["CallName"] = self.call_name
+        if CALL_INFO:
             self.box.send(0x2A, struct.pack("<I", 100) + json.dumps(info, ensure_ascii=False, separators=(",", ":")).encode() + b"\0", plain=True, droppable=False)
-            log("call: details sent to the car (status %d)" % status)
-        self.call_info = info
+            if state != self.call_last:
+                log("call: details sent to the car (status %d)" % info["CallStatus"])
+        self.call_last = state
 
     def on_phone_status(self, calls):
         """The phone's call list: the only signal that exists before the audio link, so it drives ringing and hanging up."""
@@ -182,18 +209,16 @@ class App:
         live = [c for c in calls if c["state"] not in ("INACTIVE", "UNKNOWN")]
         ring = [c for c in live if c["state"] == "INCOMING"]
         if ring:
-            self.call_state, self.call_dir = "ringing", 1
+            self.call_state = "ringing"
             self.call_tell_car("active" if self.call_active else "ringing")
-            self.call_send_info(2, ring[0]["name"], ring[0]["number"])
+            self.call_send_info(ring[0])
         elif live:
-            if self.call_state == "idle":
-                self.call_dir = 2                            # never rang here: we placed it
             self.call_state = "active"
             self.call_tell_car("active")
-            self.call_send_info(4, live[0]["name"], live[0]["number"])
+            self.call_send_info(live[0])
         else:
-            self.call_state, self.call_dir = "idle", 2
-            self.call_send_info(0)
+            self.call_state = "idle"
+            self.call_send_info(calls[0] if calls else None)
             if not self.call_active:                         # app calls (Meet...) report nothing: their audio link decides
                 self.call_tell_car(None)
 
@@ -283,6 +308,7 @@ class App:
     async def sync_car(self):
         self.sid += 1
         sid = self.sid
+        self.show_sid = None                                 # a re-opened car has forgotten any announcement
         self.car_is_open, self.car_ready, self.synced = True, False, False
         await asyncio.sleep(0.4)
         if sid != self.sid:
@@ -295,21 +321,59 @@ class App:
             except Exception:
                 pass
         elif self.session and self.session.alive:
-            await self.announce_phone(sid)
+            if self.streaming:                               # otherwise run_session announces it when its video starts
+                await self.announce_phone(sid)
         else:
             log("car is ready but no phone session yet; will announce when it connects")
+            asyncio.ensure_future(self.show_connecting(sid))
 
-    async def announce_phone(self, sid):
-        """Tell the car a phone is connected (the sequence the real dongle sends), then restart the video."""
-        n = 0
+    async def send_announcement(self, sid):
+        """The sequence the real dongle sends when a phone connects. False if the car re-opened meanwhile."""
         for m in self.ref:
             if m["dir"] == "box" and 2.3 < m["t"] < 3.8:
                 if sid != self.sid:
-                    return
+                    return False
                 self.box.send(m["type"], bytes.fromhex(m["hex"]), plain=not m["enc"])
-                n += 1
                 await asyncio.sleep(0.03)
-        log("announced the phone to the car (%d messages); restarting the video stream" % n)
+        return True
+
+    show_sid = None                                      # the car session the connecting picture is running for
+    announced = None                                     # the car session the phone was announced to
+    streaming = False                                    # the phone session's video has started
+
+    async def show_connecting(self, sid):
+        """No phone: the car only shows video once a phone is announced, so announce one and repeat a still keyframe until a real
+        phone takes over (announce_phone). Repeating it also covers the car's keyframe requests."""
+        path = os.path.join(ROOT, "data", "connecting-%dx%d.h264" % self.car_size)
+        if not CONNECTING or self.show_sid == sid or sid != self.sid or (self.session and self.session.alive):
+            return
+        try:
+            frame = open(path, "rb").read()
+        except OSError:
+            log("no connecting picture for this display: %s" % path)
+            return
+        self.show_sid = sid
+        if not await self.send_announcement(sid):
+            return
+        log("showing the connecting picture")
+        m = aas.compute_mode(*self.car_size)
+        while self.show_sid == sid and sid == self.sid:
+            self.box.send(T_VIDEO, struct.pack("<5I", m["fw"], m["fh"], 3, int(time.time() * 1000) & 0xFFFFFFFF, 0) + frame)
+            await asyncio.sleep(0.5)
+
+    async def announce_phone(self, sid):
+        """Tell the car a phone is connected, then restart the video. Once per car session: the car and the phone can come back at
+        the same moment, and two announcements running together leave the car's screen black."""
+        if self.announced == sid:
+            return
+        self.announced = sid
+        if self.show_sid is not None:                        # the car thinks the picture was a phone: end that one first
+            self.show_sid = None
+            self.box.send(4, b"")
+            await asyncio.sleep(0.5)
+        if not await self.send_announcement(sid):
+            return
+        log("announced the phone to the car; restarting the video stream")
         self.mic_on = False                          # the car app restarted its session: its recorder is off again
         if self.session and self.session.mic_open:
             self.on_mic(True)
@@ -369,7 +433,7 @@ class App:
             self.box.send(boxd.T_AUDIO, struct.pack("<IfI", dec, 0.0, atype) + bytes([c]), droppable=False)
         log("audio start commands", atype, cmds)
 
-    _astop = {1: ((11, 2), 2.0), 2: ((7, 2), 1.0)}   # audio_type -> (stop commands: MEDIA_STOP/NAVI_STOP + OUTPUT_STOP, silence before stopping)
+    _astop = {1: ((2,), 2.0), 2: ((7, 2), 1.0)}      # audio_type -> (stop commands: OUTPUT_STOP, NAVI_STOP first for navigation; silence before stopping)
     car_night = None                                     # day/night as explicitly reported by the car (None = left to the box)
 
     def car_night_file(self, v):
@@ -399,6 +463,8 @@ class App:
         dec = self._aact.pop(atype, None)
         self._aon.pop(atype, None)
         if dec is not None and self.box and self.car_is_open:
+            if atype == 1:
+                self.media_signal(False)
             cmds = self._astop[atype][0]
             self._alast = time.time()
             for c in cmds:
@@ -419,7 +485,9 @@ class App:
         atype, dec = (1, 4) if ch == aas.CH_MEDIA else (2, 5)
         now = time.time()
         if now - self._aon.get(atype, 0) > 1.5:
-            self._acmd(atype, dec, (10, 1) if atype == 1 else (6, 1))   # MEDIA_START/OUTPUT_START, or NAVI_START
+            if atype == 1:
+                self.media_signal(True)
+            self._acmd(atype, dec, (1,) if atype == 1 else (6, 1))      # OUTPUT_START, after NAVI_START for navigation
         self._aact[atype] = dec
         self._aon[atype] = now
         self.box.send(boxd.T_AUDIO, struct.pack("<IfI", dec, 0.0, atype) + pcm)
@@ -428,32 +496,51 @@ class App:
     media_source = ""
     media_state = None
     media_track = None
+    media_art = 0                                        # size of the last cover sent: the firmware's "same cover" test
+    media_on = False                                     # the car was told MEDIA_START
+
+    def media_signal(self, on):
+        """MEDIA_START / MEDIA_STOP. Unlike OUTPUT_START/STOP these follow the playback state, so a pause is told at once."""
+        if on != self.media_on and self.box and self.car_is_open:
+            self.media_on = on
+            self._alast = time.time()                        # the car answers these with its own play/pause too
+            self.box.send(boxd.T_AUDIO, struct.pack("<IfI", 4, 0.0, 1) + bytes([10 if on else 11]), droppable=False)
 
     def media_json(self, info, droppable):
-        """MetaData message, subtype 1: plain JSON + NUL, the same as a real dongle sends in Android Auto mode."""
-        if self.box and self.car_ready:
-            self.box.send(0x2A, struct.pack("<I", 1) + json.dumps(info, ensure_ascii=False, separators=(",", ":")).encode() + b"\0",
-                          plain=True, droppable=droppable)
+        """MetaData message, subtype 1: plain JSON + NUL."""
+        self.box.send(0x2A, struct.pack("<I", 1) + json.dumps(info, ensure_ascii=False, separators=(",", ":")).encode() + b"\0",
+                      plain=True, droppable=droppable)
 
     def on_media(self, kind, m):
+        """The firmware's mediaPlaybackUpdate and mediaMetadataUpdate. Neither has MediaPlayStatus: playing is told by media_signal."""
+        if not self.box or not self.car_ready:
+            return
         if kind == "status":
-            self.media_source = m["source"] or self.media_source
+            if m["state"] == "PLAYING" and 1 not in self._aact:    # "drop invalid playback_state": no media audio is running
+                return
             if m["state"] != self.media_state:
                 self.media_state = m["state"]
+                self.media_signal(m["state"] == "PLAYING")
                 log("media: %s (%s)" % (m["state"], m["source"]))
-            self.media_json({"MediaSongPlayTime": m["position"] * 1000, "MediaPlayStatus": 1 if m["state"] == "PLAYING" else 0}, True)
+            info = {}
+            if m["source"] is not None and m["source"] != self.media_source:
+                info["MediaAPPName"] = self.media_source = m["source"]
+            if m["position"] is not None:
+                info["MediaSongPlayTime"] = m["position"] * 1000
+            self.media_json(info, True)
             return
-        track = (m["title"], m["artist"], m["album"], m["duration"], len(m["art"]))
-        if track == self.media_track:                        # the phone repeats this message many times per track
-            return
-        self.media_track = track
-        self.media_json({"MediaAPPName": self.media_source, "MediaSongName": m["title"], "MediaArtistName": m["artist"],
-                         "MediaAlbumName": m["album"], "MediaSongDuration": m["duration"] * 1000, "MediaSongPlayTime": 0}, False)
+        info = {k: m[f] for k, f in (("MediaSongName", "title"), ("MediaArtistName", "artist"), ("MediaAlbumName", "album")) if m[f] is not None}
+        if m["duration"] is not None:
+            info["MediaSongDuration"] = m["duration"] * 1000
+        self.media_json(info, False)
         art = m["art"]
-        if art and len(art) <= MEDIA_ART_MAX and self.box and self.car_ready:
-            sub = 2 if art[:4] == b"\x89PNG" else 3          # Android Auto captures show PNG as 2, CarPlay JPEG as 3
-            self.box.send(0x2A, struct.pack("<I", sub) + art, plain=True, droppable=True)
-        log("media: track details sent to the car (%d bytes of art)" % len(art))
+        if art and len(art) != self.media_art and len(art) <= MEDIA_ART_MAX:
+            self.media_art = len(art)
+            self.box.send(0x2A, struct.pack("<I", 2) + art, plain=True, droppable=True)    # always 2, whatever the format; no NUL
+        track = (m["title"], m["artist"], m["album"], m["duration"], len(art))
+        if track != self.media_track:
+            self.media_track = track
+            log("media: track details sent to the car (%d bytes of art)" % len(art))
 
     # -------------------------------------------------- buttons car -> phone
     # box protocol Command value -> Android keycode (steering-wheel / head-unit media keys)
@@ -498,19 +585,27 @@ class App:
 
     # -------------------------------------------------- phone session loop
     async def run_session(self, r, w, how):
+        notice_lost_phone(w)
         s = aas.AASession(r, w, on_video=self.on_video, on_audio=self.on_audio, mode=aas.compute_mode(*self.car_size), on_mic=self.on_mic, night=self.want_night(), on_phone_status=self.on_phone_status, on_media=self.on_media)
         self.session = s
-        self.media_track = None
-        self.call_info = None                # a new session starts with {"CallStatus":0}, as on a real dongle
+        self.media_track, self.media_state, self.media_source, self.media_art, self.media_on = None, None, "", 0, False
+        self.call_last, self.call_incoming, self.call_number, self.call_name = None, False, "", ""
         log("phone session started (%s), video mode for car display %dx%d: res %d frame %dx%d ui %dx%d" % ((how,) + self.car_size + (s.mode["res"], s.mode["fw"], s.mode["fh"], s.mode["uw"], s.mode["uh"])))
         task = asyncio.ensure_future(s.run())
         wd = asyncio.ensure_future(self.audio_watchdog())
         nl = asyncio.ensure_future(self.night_loop())
-        await s.wait_video_started()
-        log("phone session is streaming")
-        if self.car_is_open:
-            await self.announce_phone(self.sid)
-        await task
+        started = asyncio.ensure_future(s.wait_video_started())
+        await asyncio.wait({task, started}, return_when=asyncio.FIRST_COMPLETED)
+        if started.done():
+            self.streaming = True
+            log("phone session is streaming")
+            if self.car_is_open:
+                await self.announce_phone(self.sid)
+        started.cancel()
+        try:
+            await task
+        except Exception as e:                               # the usual end of a phone that left: the cleanup below still has to run
+            log("phone session lost: %r" % e)
         wd.cancel(); nl.cancel()
         self.on_phone_status([])
         for a in list(self._aact):
@@ -518,11 +613,14 @@ class App:
         log("phone session ended")
         if self.mic_on:
             self.on_mic(False)
-        self.session, self.car_ready, self.synced = None, False, False
+        self.session, self.car_ready, self.synced, self.streaming, self.announced = None, False, False, False, None
         try:
             self.box.send(4, b"")                             # Unplugged
         except Exception:
             pass
+        if self.car_is_open:
+            await asyncio.sleep(1)
+            await self.show_connecting(self.sid)
 
     async def on_wireless(self, r, w):
         """The phone joined our Wi-Fi after the Bluetooth hand-off and connected to TCP 5288."""
@@ -565,6 +663,15 @@ def aa_newest_lease():
         return None
 
 
+async def leave_usb_gap():
+    """After a service restart the device is gone from USB for about a second. The car then reconnects at once but leaves an empty
+    page in front of the video, and touches do not arrive. Gone for several seconds, it reopens the projection properly."""
+    if os.path.exists(RESTART_MARK):
+        log("service restart: staying off USB for %g s so the car reopens its screen" % USB_GAP)
+        await asyncio.sleep(USB_GAP)
+    open(RESTART_MARK, "w").close()
+
+
 async def amain(a):
     loop = asyncio.get_running_loop()
     ref = json.load(open(a.ref))
@@ -575,6 +682,7 @@ async def amain(a):
                 app.call_datagram(data)
         await loop.create_datagram_endpoint(_Calls, local_addr=("127.0.0.1", int(os.environ.get("AA_CALL_PORT_OUT", "5290"))))
         log("calls: relay enabled (UDP %s)" % os.environ.get("AA_CALL_PORT_OUT", "5290"))
+    await leave_usb_gap()
     ep0 = boxd.setup_gadget(a.udc)
     ep_in = os.open(boxd.FFS + "/ep1", os.O_WRONLY)
     ep_out = os.open(boxd.FFS + "/ep2", os.O_RDONLY)

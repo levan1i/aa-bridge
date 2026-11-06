@@ -53,6 +53,9 @@ RFCOMM exchange: `WifiStartRequest(ip, port 5288)` → `WifiInfoRequest` → `Wi
 The head unit offers the media info channel (descriptor field 9, no settings). The phone then sends MediaPlaybackStatus (0x8001:
 1 state, 2 PLAYING / 1 STOPPED / 3 PAUSED; 2 app name; 3 seconds) about once a second, and MediaPlaybackMetadata (0x8003: 1 title,
 2 artist, 3 album, 4 art, 6 duration in seconds) on a track change. These become box message 0x2A, never encrypted, `<I subtype>` +
-content. Subtype 1 is JSON + NUL: `MediaAPPName`, `MediaSongName`, `MediaArtistName`, `MediaAlbumName`, `MediaSongDuration` (ms),
-`MediaSongPlayTime` (ms) on a track change, then `MediaSongPlayTime` and `MediaPlayStatus` (1 playing). Subtype 2 is PNG art and 3 is
-JPEG art. `AA_MEDIA_INFO=0` stops offering the channel.
+content, and the fields follow the firmware's `mediaPlaybackUpdate` and `mediaMetadataUpdate` (`ARMAndroidAuto`). Subtype 1 is JSON + NUL.
+Each status gives `MediaSongPlayTime` (ms), plus `MediaAPPName` when the app changes. Each metadata message gives `MediaSongName`,
+`MediaArtistName`, `MediaAlbumName` and `MediaSongDuration` (ms), only those the phone sent. `MediaPlayStatus` is CarPlay only. Subtype 2
+is the cover, raw with no NUL, whatever its format, sent when its size changes. Playing is told by audio commands: MEDIA_START (10) or
+MEDIA_STOP (11) when the state changes, and a PLAYING status is dropped while no media audio runs. The stock AutoKit does not draw any of
+this: it passes it to apps bound to `IMusicInfoChangeListener` and `ICallInfoChangeListener`. `AA_MEDIA_INFO=0` stops offering the channel.

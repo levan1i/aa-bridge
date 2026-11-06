@@ -97,6 +97,9 @@ Logs: `/var/log/standalone.log`, `/var/log/aa_bt.log`.
 | `AA_NIGHT` | `auto` | day/night theme sent to the phone: `auto` (the car's own report if it sends one, otherwise by clock), or fixed `day` / `night` |
 | `AA_NIGHT_FROM`, `AA_NIGHT_TO` | `18`, `7` | hours (local time) when night starts and ends in `auto` mode |
 | `AA_CALLS` | `0` | [phone-call audio](docs/calls.md): relay the call voice to the car speakers and the car microphone back to the phone |
+| `AA_CONNECTING` | `1` | show a still picture (`data/connecting-<W>x<H>.h264`, made by `tools/make_connecting.py`) while no phone is connected |
+| `AA_BT_RECONNECT` | `1` | while the car is on with no phone session, call the paired phones over Bluetooth so Android Auto starts again |
+| `AA_USB_GAP` | `10` | seconds the service stays off USB after a restart; with a shorter gap the car keeps an empty page in front of the video |
 | `AA_TZ` | system time zone | time zone for the clock-based day/night, e.g. `Asia/Tbilisi` |
 
 ## Layout
@@ -106,6 +109,7 @@ src/standalone.py   the bridge: car emulator + glue (video/audio/touch), phone s
 src/aa_session.py   Android Auto head-unit protocol over one TCP connection (framing, TLS, channels, video mode)
 src/aa_bt.py        Bluetooth hand-off for wireless AA (BlueZ profiles, RFCOMM WifiStart/WifiInfo)
 src/boxd.py         Carlinkit box emulation: FunctionFS gadget + encrypted AutoKit protocol
+data/connecting-*.h264  still picture shown while no phone is connected
 data/session_ref.json   startup replies of a real dongle (personal data replaced, see docs/protocol.md)
 config/ systemd/ scripts/   AP, DHCP, Bluetooth and service configuration, installer
 tools/              fakecar.py (stand-in for the car app), Android-x86 VM runner, udev rule

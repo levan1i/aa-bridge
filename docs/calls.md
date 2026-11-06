@@ -44,11 +44,11 @@ The phone's status drives the car, because it is the only signal before the audi
 
 * `INCOMING` -> audio command 14; in a call -> 4; no calls and no audio link -> 5. App calls (Meet, Messenger) report no status, so
   for them the audio link alone drives 4 and 5.
-* Caller details: message type 0x2A (never encrypted), `<I 100>` + JSON + NUL with `CallStatus` (2 ringing, 4 active, 0 idle),
-  `CallDirection` (1 in, 2 out), `CallID` (UUID per call), `CallName` (the number if there is no name), `CallNumber`; just
-  `{"CallStatus":0}` at session start and when idle. The format comes from CarPlay captures of a real dongle. Android Auto does not
-  report the brief states 1 (dialing) and 3 (connecting), so they are not sent. The car may ignore all of it; `AA_CALL_INFO=0` turns
-  it off. Numbers and names are not logged.
+* Caller details: message type 0x2A (never encrypted), `<I 100>` + JSON + NUL, following the firmware's `phoneStatusUpdate`
+  (`ARMAndroidAuto`), sent on every phone update during a call. `CallStatus` is 2 incoming, 4 in call or conference, 5 on hold,
+  3 muted, 0 otherwise. `CallDirection` is 1 if the call rang, else 2. `CallNumber` and `CallID` (the same value) and `CallName` appear
+  only if the phone gave them. When the calls end, one message has status 0 with the last number and name; the first update of a session
+  does the same with empty strings. The car may ignore all of it; `AA_CALL_INFO=0` turns it off. Numbers and names are not logged.
 * Car commands 300 (answer) and 301 (hang up) become Android keys 5 and 6. If the phone's state has not changed a second later,
   `AT+CKPD=200` presses the headset button. That button toggles, so it is never used to reject a ringing call.
 
