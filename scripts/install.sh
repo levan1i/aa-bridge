@@ -32,7 +32,7 @@ case "$CHANNEL" in 36|40|44|48) VHT=42;; 52|56|60|64) VHT=58;; 100|104|108|112) 
 echo "== packages"
 apt-get update -qq
 apt-get install -y python3-protobuf protobuf-compiler python3-cryptography python3-dbus-next \
-    hostapd dnsmasq bluez bluez-tools iw git openssl python3-usb
+    hostapd dnsmasq bluez bluez-tools iw git openssl python3-usb libspeexdsp1
 systemctl disable --now hostapd dnsmasq 2>/dev/null || true   # the stock services would fight ours
 
 echo "== files -> $DEST"

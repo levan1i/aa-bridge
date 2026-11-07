@@ -254,14 +254,34 @@ async def reach_phone(bus):
     return False
 
 
+async def reopen_headset(bus):
+    """Android Auto runs over Wi-Fi, but calls need the Bluetooth headset link. Restarting this service drops that link and the
+    phone does not reopen it by itself, so ask the last phone for it (no disconnect: the Android Auto session stays)."""
+    p = phoneid.load()
+    if not p:
+        return
+    path = "/org/bluez/hci0/dev_" + p["mac"].replace(":", "_")
+    try:
+        dev = await bluez_iface(bus, path, "org.bluez.Device1")
+        log("Android Auto is on but calls have no headset link: asking", p["mac"], "for it")
+        await dev.call_connect_profile(HSP_AG)
+    except Exception as e:
+        log("could not reopen the headset link:", repr(e))
+
+
 async def reconnect_loop(bus):
     """While the car is on with no phone session, keep asking the paired phones to connect, less often as time goes on."""
     idle = wake = 0.0
     wait = 20
+    started, hs_wake = time.time(), 0.0
     while True:
         await asyncio.sleep(3)
         now = time.time()
         busy = CALLS is not None and CALLS.active
+        if (CALLS is not None and CALLS.rfcomm is None and not busy and phone_session_up()
+                and now - started > 20 and now - LAST_AA > 20 and now > hs_wake):
+            hs_wake = now + 60
+            await reopen_headset(bus)
         if phone_session_up() or busy or not car_attached():
             idle, wake, wait = 0.0, 0.0, 20
             continue

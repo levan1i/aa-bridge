@@ -27,10 +27,19 @@ caller <-> phone ==Bluetooth SCO (8 kHz mono)==> Beagle (aa_bt.py + callaudio.py
   The default is the first row (`AA_CALL_PLAY_DEC=3`, `AA_CALL_MIC_DEC=5`). AutoKit feeds its echo canceller only when the two
   decode types match, so `callaudio.py` suppresses the echo itself: it turns the mic down while the caller is talking
   (`AA_CALL_DUCK`, `AA_CALL_DUCK_LEVEL`, `AA_CALL_DUCK_HOLD`). This is half-duplex, like a speakerphone.
-  The caller's voice comes back through the car speaker and mic late, after the car's buffering, so a fixed hold can end before
-  the echo does. During the call the bridge compares the caller's loudness with the mic's, finds the delay, and keeps the mic
-  down for that delay plus `AA_CALL_ECHO_MARGIN` (0.3 s), at most `AA_CALL_ECHO_HOLD_MAX` (2.5 s). `aa_bt.log` shows the
-  delay it found (`echo comes back after ... ms`) and, after each call, `echo delay ...`.
+  **Echo canceller (default).** With `libspeexdsp1` installed, `callaudio.py` cancels the echo instead (speexdsp's echo
+  canceller and its echo suppressor), so both sides can talk at once. The caller's voice comes back through the car about
+  620 ms late (the car buffers), so the caller audio is held back by about that much before it is used as the reference, and the
+  canceller models only a 200 ms window around it (`AA_CALL_AEC_TAIL`, `AA_CALL_AEC_LEAD`). During each call the bridge measures
+  the delay by comparing the caller's loudness with the mic's, re-aligns if it moved out of the window, and saves it in
+  `/var/lib/beagle-aa-bridge/echo.json` for the next call (`AA_CALL_ECHO_DELAY` before the first one). For the first 2 s, while
+  the canceller learns (`AA_CALL_AEC_WARMUP`), the mic is turned down while the caller talks. The mic gain (`AA_CALL_MIC_GAIN`)
+  is applied after cancelling: clipped echo cannot be cancelled. Speex applies its echo suppression only with its noise
+  reduction on (`AA_CALL_AEC_DENOISE=1`, the default). `AA_CALL_AEC=0`, or no `libspeexdsp1`, falls back to turning the mic
+  down, held for the measured delay plus `AA_CALL_ECHO_MARGIN` (0.3 s). `aa_bt.log` shows which one runs, the delay found and,
+  after each call, a summary.
+* Restarting `aa-bt` drops the phone's Bluetooth headset link while Android Auto keeps running over Wi-Fi; `aa_bt.py` asks the
+  phone to reopen it after about 20 s, so calls come back to the car.
 * Enable with `AA_CALLS=1` in `/etc/beagle-aa-bridge/env`, then restart `aa-bt` and `standalone`.
 
 ## What the phone is told
