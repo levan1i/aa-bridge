@@ -28,7 +28,9 @@ MIC_GAIN = float(os.environ.get("AA_CALL_MIC_GAIN", "6"))     # the car mic arri
 DUCK = float(os.environ.get("AA_CALL_DUCK", "0.1"))           # mic level while the caller is talking (1 = no echo suppression)
 DUCK_LEVEL = int(os.environ.get("AA_CALL_DUCK_LEVEL", "300"))  # caller sample above this counts as talking
 DUCK_HOLD = float(os.environ.get("AA_CALL_DUCK_HOLD", "0.4"))  # seconds to stay ducked: the speaker-to-mic echo arrives late
-TONE_FILE = "/run/aa-call-tone"  # if this file exists when a call starts, send a 440 Hz test tone instead of the car mic
+ECHO_MARGIN = float(os.environ.get("AA_CALL_ECHO_MARGIN", "0.3"))   # stay down this long past the measured echo delay
+ECHO_HOLD_MAX = float(os.environ.get("AA_CALL_ECHO_HOLD_MAX", "2.5"))
+TONE_FILE ="/run/aa-call-tone"  # if this file exists when a call starts, send a 440 Hz test tone instead of the car mic
 TONE = array.array("h", [int(12000 * math.sin(2 * math.pi * 440 * i / 8000)) for i in range(8000)]).tobytes()   # 1 s, loops cleanly
 
 
@@ -63,6 +65,66 @@ class Ducker:
         if target < 1.0:
             self.ducked += 1
         return mic if self.gain > 0.99 else amplify(mic, self.gain)
+
+
+class EchoMeter:
+    """Finds how late the caller's voice comes back through the car mic (car speaker -> mic, plus the car's buffering), so the
+    ducker can stay down for that long. Works on 20 ms loudness blocks: the caller's loudness, shifted by the right delay,
+    matches the mic's loudness when the mic hears mostly echo."""
+    BLOCK = 160                                      # samples per loudness block (20 ms at 8 kHz)
+    MAX_LAG = int(os.environ.get("AA_CALL_ECHO_MAX", "100"))       # blocks: 2 s
+    WINDOW = 250                                     # blocks looked at (5 s)
+    MIN_CORR = 0.5                                   # how well the shifted loudness has to match to trust the delay
+
+    def __init__(self):
+        self.blocks = []                             # (caller loudness, mic loudness) per block; one list, so a copy is consistent
+        self._c = self._m = self._n = 0
+        self.count = 0                               # blocks seen
+        self.lag = None                              # blocks
+        self.corr = 0.0
+
+    def add(self, caller_pcm, mic_pcm):
+        a, b = array.array("h"), array.array("h")
+        a.frombytes(caller_pcm[:len(caller_pcm) // 2 * 2])
+        b.frombytes(mic_pcm[:len(mic_pcm) // 2 * 2])
+        self._c += sum(abs(x) for x in a)
+        self._m += sum(abs(x) for x in b)
+        self._n += min(len(a), len(b)) or max(len(a), len(b))
+        if self._n >= self.BLOCK:
+            self.blocks.append((self._c / self._n, self._m / self._n))
+            self._c = self._m = self._n = 0
+            self.count += 1
+            if len(self.blocks) > self.WINDOW + self.MAX_LAG:
+                del self.blocks[0]
+            return True
+        return False
+
+    def estimate(self):
+        """Best delay in seconds, or None until the caller has talked enough to tell."""
+        b = list(self.blocks)                        # the audio thread keeps adding while this runs
+        c, m = [x for x, _ in b], [y for _, y in b]
+        n = len(m) - self.MAX_LAG
+        if n < 50:
+            return None
+        best, best_lag = 0.0, None
+        mm = m[-n:]
+        mean_m = sum(mm) / n
+        dm = [x - mean_m for x in mm]
+        sm = math.sqrt(sum(x * x for x in dm))
+        for lag in range(0, self.MAX_LAG + 1):
+            cc = c[len(c) - n - lag:len(c) - lag]
+            mean_c = sum(cc) / n
+            dc = [x - mean_c for x in cc]
+            sc = math.sqrt(sum(x * x for x in dc))
+            if sc == 0 or sm == 0:
+                continue
+            r = sum(x * y for x, y in zip(dc, dm)) / (sc * sm)
+            if r > best:
+                best, best_lag = r, lag
+        self.corr = best
+        if best >= self.MIN_CORR:
+            self.lag = best_lag
+        return None if self.lag is None else self.lag * self.BLOCK / 8000
 
 
 class CallAudio:
@@ -169,6 +231,14 @@ class CallAudio:
         self.fill += 1
         return b"\0" * n                                       # silence when the car mic has nothing yet
 
+    def _measure(self, meter, ducker):
+        delay = meter.estimate()
+        if delay is not None:
+            hold = min(ECHO_HOLD_MAX, max(DUCK_HOLD, delay + ECHO_MARGIN))
+            if abs(hold - ducker.hold) > 0.05:
+                self.log("call audio: echo comes back after %.0f ms (match %.2f), mic stays down %.2f s" % (delay * 1000, meter.corr, hold))
+                ducker.hold = hold
+
     def relay(self, conn):
         """Move audio both ways on one SCO link until it closes (call over)."""
         self.active = True
@@ -179,6 +249,8 @@ class CallAudio:
         n_in = n_out = peak_in = peak_out = tone_pos = self.fill = 0
         tone = os.path.exists(TONE_FILE)
         ducker = Ducker()
+        meter = EchoMeter()
+        busy = None
         if tone:
             self.log("call audio: sending the 440 Hz test tone instead of the car mic")
         t0 = time.time()
@@ -196,7 +268,11 @@ class CallAudio:
                     m = (TONE + TONE)[tone_pos:tone_pos + len(d)]
                     tone_pos = (tone_pos + len(d)) % len(TONE)
                 else:
-                    m = ducker.process(peak(d), self._take_mic(len(d)), time.time())    # every packet in -> one packet of car mic out
+                    raw = self._take_mic(len(d))                  # every packet in -> one packet of car mic out
+                    if meter.add(d, raw) and meter.count % 50 == 0 and not (busy and busy.is_alive()):
+                        busy = threading.Thread(target=self._measure, args=(meter, ducker), daemon=True)   # off the audio path
+                        busy.start()
+                    m = ducker.process(peak(d), raw, time.time())
                 conn.send(m)
                 n_out += 1
                 peak_in, peak_out = max(peak_in, peak(d)), max(peak_out, peak(m))
@@ -211,3 +287,5 @@ class CallAudio:
             self.out.sendto(b"E", ("127.0.0.1", CALL_TO_BRIDGE))
             self.log("call audio: SCO closed after %.0f s (%d packets in, %d out, %d of them empty filler, %d ducked; loudest sample: caller %d, sent to phone %d of 32767, gain %g)"
                      % (time.time() - t0, n_in, n_out, self.fill, ducker.ducked, peak_in, peak_out, MIC_GAIN))
+            self.log("call audio: echo delay %s (best match %.2f), mic hold %.2f s, depth %g"
+                     % ("%.0f ms" % (meter.lag * meter.BLOCK / 8) if meter.lag is not None else "not found", meter.corr, ducker.hold, ducker.depth))

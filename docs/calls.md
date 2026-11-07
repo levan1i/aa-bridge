@@ -27,6 +27,10 @@ caller <-> phone ==Bluetooth SCO (8 kHz mono)==> Beagle (aa_bt.py + callaudio.py
   The default is the first row (`AA_CALL_PLAY_DEC=3`, `AA_CALL_MIC_DEC=5`). AutoKit feeds its echo canceller only when the two
   decode types match, so `callaudio.py` suppresses the echo itself: it turns the mic down while the caller is talking
   (`AA_CALL_DUCK`, `AA_CALL_DUCK_LEVEL`, `AA_CALL_DUCK_HOLD`). This is half-duplex, like a speakerphone.
+  The caller's voice comes back through the car speaker and mic late, after the car's buffering, so a fixed hold can end before
+  the echo does. During the call the bridge compares the caller's loudness with the mic's, finds the delay, and keeps the mic
+  down for that delay plus `AA_CALL_ECHO_MARGIN` (0.3 s), at most `AA_CALL_ECHO_HOLD_MAX` (2.5 s). `aa_bt.log` shows the
+  delay it found (`echo comes back after ... ms`) and, after each call, `echo delay ...`.
 * Enable with `AA_CALLS=1` in `/etc/beagle-aa-bridge/env`, then restart `aa-bt` and `standalone`.
 
 ## What the phone is told
